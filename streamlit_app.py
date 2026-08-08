@@ -14,7 +14,7 @@ Reaproveita 100% da engine de cálculo e dos gráficos originais:
 
 O que mudou é só a camada de entrada/saída:
   - argparse (--codigo, --vencimento, --dir)  -> controles na sidebar
-  - print() no console                        -> st.markdown / st.plotly_chart ao vivo
+  - print() no console                        -> st.html / st.plotly_chart ao vivo
   - salvar um .html                           -> renderização nativa (+ export opcional)
 
 Rodar localmente:
@@ -55,40 +55,32 @@ def _fmt_data_br(d) -> str:
 # ----------------------------------------------------------------------------
 
 def _injetar_tema():
-    st.markdown(f"""
-    <link rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
-    <style>
-      .titulo-painel {{ font-family:'JetBrains Mono',monospace; font-size:13px;
-                         color:{CORES['texto']}; margin-bottom:14px; }}
-      .subtitulo {{ font-family:'JetBrains Mono',monospace; font-size:12px;
-                     color:{CORES['fraco']}; margin:18px 0 8px;
-                     text-transform:uppercase; letter-spacing:.05em; }}
-
-      .cards-row {{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:10px; }}
-      .cards-row-3 {{ grid-template-columns:repeat(3,1fr); }}
-      .card {{ background:{CORES['fundo']}; border:1px solid {CORES['borda']}; border-radius:8px;
-               padding:10px 12px; text-align:center; }}
-      .card-label {{ font-family:'JetBrains Mono',monospace; font-size:10px; color:{CORES['fraco']};
-                     text-transform:uppercase; margin-bottom:6px; }}
-      .card-value {{ font-family:'JetBrains Mono',monospace; font-size:16px; font-weight:600;
-                      color:{CORES['texto']}; }}
-
-      .boxes-row {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }}
-      .box {{ border:1px solid {CORES['borda']}; border-radius:8px; padding:8px 14px; flex:1 1 150px;
-              font-family:'JetBrains Mono',monospace; font-size:13px; white-space:nowrap; }}
-      .box-label {{ color:{CORES['fraco']}; }}
-      .box-value {{ color:{CORES['texto']}; font-weight:700; }}
-
-      .tabela {{ width:100%; border-collapse:collapse; font-family:'JetBrains Mono',monospace;
-                  font-size:12px; margin-bottom:6px; color:{CORES['texto']}; }}
-      .tabela th {{ text-align:left; color:{CORES['fraco']}; font-weight:500; padding:6px 8px;
-                    border-bottom:1px solid {CORES['borda']}; text-transform:uppercase; font-size:10px; }}
-      .tabela td {{ padding:6px 8px; border-bottom:1px solid {CORES['borda']}; }}
-
-      .disclaimer {{ margin-top:14px; font-size:11px; color:{CORES['fraco']}; line-height:1.5; }}
-    </style>
-    """, unsafe_allow_html=True)
+    # st.html() em vez de st.markdown(unsafe_allow_html=True): o conteúdo vai
+    # direto pro DOM (sanitizado via DOMPurify), sem passar pelo parser de
+    # markdown. st.markdown() tratava parte deste bloco (a partir de
+    # .boxes-row) como texto de parágrafo em vez de CSS — st.html() não tem
+    # esse problema porque nunca interpreta o conteúdo como markdown.
+    st.html(
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+        'family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">'
+        f"<style>"
+        f".titulo-painel {{ font-family:'JetBrains Mono',monospace; font-size:13px; color:{CORES['texto']}; margin-bottom:14px; }}"
+        f".subtitulo {{ font-family:'JetBrains Mono',monospace; font-size:12px; color:{CORES['fraco']}; margin:18px 0 8px; text-transform:uppercase; letter-spacing:.05em; }}"
+        f".cards-row {{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:10px; }}"
+        f".cards-row-3 {{ grid-template-columns:repeat(3,1fr); }}"
+        f".card {{ background:{CORES['fundo']}; border:1px solid {CORES['borda']}; border-radius:8px; padding:10px 12px; text-align:center; }}"
+        f".card-label {{ font-family:'JetBrains Mono',monospace; font-size:10px; color:{CORES['fraco']}; text-transform:uppercase; margin-bottom:6px; }}"
+        f".card-value {{ font-family:'JetBrains Mono',monospace; font-size:16px; font-weight:600; color:{CORES['texto']}; }}"
+        f".boxes-row {{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }}"
+        f".box {{ border:1px solid {CORES['borda']}; border-radius:8px; padding:8px 14px; flex:1 1 150px; font-family:'JetBrains Mono',monospace; font-size:13px; white-space:nowrap; }}"
+        f".box-label {{ color:{CORES['fraco']}; }}"
+        f".box-value {{ color:{CORES['texto']}; font-weight:700; }}"
+        f".tabela {{ width:100%; border-collapse:collapse; font-family:'JetBrains Mono',monospace; font-size:12px; margin-bottom:6px; color:{CORES['texto']}; }}"
+        f".tabela th {{ text-align:left; color:{CORES['fraco']}; font-weight:500; padding:6px 8px; border-bottom:1px solid {CORES['borda']}; text-transform:uppercase; font-size:10px; }}"
+        f".tabela td {{ padding:6px 8px; border-bottom:1px solid {CORES['borda']}; }}"
+        f".disclaimer {{ margin-top:14px; font-size:11px; color:{CORES['fraco']}; line-height:1.5; }}"
+        f"</style>"
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -148,9 +140,9 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
     hoje_str = pd.Timestamp(data_ref).strftime("%d %b %Y")
 
     with st.container(border=True):
-        st.markdown(
+        st.html(
             f'<div class="titulo-painel">GEX {ticker}: snapshot {hoje_str} '
-            f'&bull; expiry {venc_str}</div>', unsafe_allow_html=True)
+            f'&bull; expiry {venc_str}</div>')
 
         linha1 = "".join([
             gd._card("WALLS (C/P)", f"{gex['call_wall']:.2f} / {gex['put_wall']:.2f}"),
@@ -158,11 +150,10 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
             gd._card("PCR (GLOBAL)", f"{gex['pcr']:.2f}"),
             gd._card("SPOT", f"{gex['spot']:.2f}"),
         ])
-        st.markdown(f'<div class="cards-row">{linha1}</div>', unsafe_allow_html=True)
+        st.html(f'<div class="cards-row">{linha1}</div>')
 
-        st.markdown('<div class="subtitulo">Pin Candidates (&plusmn;5% from spot)</div>',
-                    unsafe_allow_html=True)
-        st.markdown(gd._tabela_pin_candidates(gex["pin_candidates"]), unsafe_allow_html=True)
+        st.html('<div class="subtitulo">Pin Candidates (&plusmn;5% from spot)</div>')
+        st.html(gd._tabela_pin_candidates(gex["pin_candidates"]))
 
         cor_sent = (CORES["baixa"] if gex["sentiment"] == "Bearish"
                     else CORES["alta"] if gex["sentiment"] == "Bullish" else CORES["fraco"])
@@ -174,19 +165,18 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
             gd._card("FLIP DIST.", f"{gex['flip_dist']:.2f}%"),
             gd._card("HEDGING", gex["hedging"]),
         ])
-        st.markdown(f'<div class="cards-row cards-row-3">{linha2}</div>', unsafe_allow_html=True)
+        st.html(f'<div class="cards-row cards-row-3">{linha2}</div>')
 
-        st.markdown('<div class="subtitulo">Significant GEX Zones</div>', unsafe_allow_html=True)
-        st.markdown(gd._tabela_zonas(gex["zonas_significativas"]), unsafe_allow_html=True)
+        st.html('<div class="subtitulo">Significant GEX Zones</div>')
+        st.html(gd._tabela_zonas(gex["zonas_significativas"]))
 
         st.plotly_chart(gd._fig_gex_profile(gex, ticker), width='stretch',
                          config={"displayModeBar": False}, key="fig_gex")
 
-        st.markdown(
+        st.html(
             '<div class="disclaimer">Convenção assumida: dealers líquidos COMPRADOS em calls e '
             'VENDIDOS em puts (padrão usado por trackers públicos de GEX). Ajuste o sinal no '
-            'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>',
-            unsafe_allow_html=True)
+            'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
 
 
 def _painel_opcao(opcao: dict, precos_ind: pd.DataFrame, ticker: str):
@@ -199,7 +189,7 @@ def _painel_opcao(opcao: dict, precos_ind: pd.DataFrame, ticker: str):
             gd._card_box("IV PERCENTIL", f"{opcao['iv_percentil']:.2f}%"),
             gd._card_box("VOL HISTÓRICA", f"{opcao['vol_historica']:.2f}%"),
         ])
-        st.markdown(f'<div class="boxes-row">{linha1}</div>', unsafe_allow_html=True)
+        st.html(f'<div class="boxes-row">{linha1}</div>')
 
         linha2 = "".join([
             gd._card_box("PREÇO", f"{opcao['spot']:.2f}"),
@@ -209,16 +199,16 @@ def _painel_opcao(opcao: dict, precos_ind: pd.DataFrame, ticker: str):
             gd._card_box("IV RANK", f"{opcao['iv_rank']:.2f}%"),
             gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
         ])
-        st.markdown(f'<div class="boxes-row">{linha2}</div>', unsafe_allow_html=True)
+        st.html(f'<div class="boxes-row">{linha2}</div>')
 
         st.plotly_chart(gd._fig_direita(precos_ind, ticker), width='stretch',
                          config={"displayModeBar": False}, key="fig_direita")
 
-        st.markdown(
+        st.html(
             f'<div class="disclaimer">IV Rank / IV Percentil: {opcao["fonte_iv_rank"]} '
             f'&mdash; log local com {opcao["n_obs_log_iv"]} observação(ões) para o contrato '
             f'{opcao["codigo"]}. Passa a usar IV real do contrato assim que o log acumular '
-            f'30+ execuções.</div>', unsafe_allow_html=True)
+            f'30+ execuções.</div>')
 
 
 # ----------------------------------------------------------------------------
