@@ -217,8 +217,18 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
             'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
 
 
+CORES_CLASSIFICACAO = {
+    "Alta": CORES["alta"],      # verde
+    "Baixa": "#e056c8",         # magenta
+    "Neutra": "#ffffff",        # branco
+}
+
+
 def _badge(valor_fmt: str, classe: str) -> str:
-    return f'{valor_fmt}<span class="vol-badge">{classe}</span>'
+    cor = CORES_CLASSIFICACAO.get(classe, CORES["fraco"])
+    return (f'{valor_fmt}<span class="vol-badge" '
+            f'style="background:{cor}; border-color:{cor}; color:{CORES["fundo"]};">'
+            f'{classe}</span>')
 
 
 def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFrame, ticker_atual: str):
