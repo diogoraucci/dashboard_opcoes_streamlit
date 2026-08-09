@@ -79,6 +79,10 @@ def _injetar_tema():
         f".tabela th {{ text-align:left; color:{CORES['fraco']}; font-weight:500; padding:6px 8px; border-bottom:1px solid {CORES['borda']}; text-transform:uppercase; font-size:10px; }}"
         f".tabela td {{ padding:6px 8px; border-bottom:1px solid {CORES['borda']}; }}"
         f".disclaimer {{ margin-top:14px; font-size:11px; color:{CORES['fraco']}; line-height:1.5; }}"
+        f".vol-badge {{ display:inline-block; margin-left:6px; padding:1px 7px; border-radius:10px; "
+        f"font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.03em; "
+        f"background:{CORES['fundo']}; border:1px solid {CORES['borda']}; color:{CORES['fraco']}; "
+        f"vertical-align:middle; }}"
         f"</style>"
     )
 
@@ -127,11 +131,23 @@ def carregar_df_cotacoes() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Calculando RSI e volatilidade histórica do ativo-objeto...")
 def indicadores_ativo_cached(df_cotacoes: pd.DataFrame, ativo: str) -> pd.DataFrame:
-    """Reaproveita m.calcular_indicadores_precos (RSI, HV, HV_PCTL) — só remonta
-    a coluna do ativo escolhido no formato ('data','fechamento') que a função espera."""
+    """Reaproveita m.calcular_indicadores_precos (RSI, HV) — só remonta a coluna
+    do ativo escolhido no formato ('data','fechamento') que a função espera.
+    Usado só pelos 3 gráficos (série histórica); os cards de VOL HISTÓRICA/IV
+    RANK/IV PERCENTIL vêm de carregar_class_vol(), não daqui."""
     precos_ativo = df_cotacoes[[ativo]].reset_index()
     precos_ativo.columns = ["data", "fechamento"]
     return m.calcular_indicadores_precos(precos_ativo)
+
+
+@st.cache_data(show_spinner="Carregando classificações de volatilidade (class_vol)...")
+def carregar_class_vol() -> pd.DataFrame:
+    """Lê df_cotacoes.xlsx (aba 'class_vol'): 1 linha por ticker, com Vol_Realizada/
+    Vol_Rank/Vol_Percentil (valores em %) e suas respectivas *_class ('Alta'/'Baixa'/
+    'Neutra') já pré-calculados. Indexado por 'ticker' pra lookup direto."""
+    df = pd.read_excel(CAMINHO_COTACOES, sheet_name="class_vol")
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")])
+    return df.set_index("ticker")
 
 
 @st.cache_data(show_spinner="Gerando dados sintéticos de exemplo...")
@@ -201,7 +217,11 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
             'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
 
 
-def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, ticker_atual: str):
+def _badge(valor_fmt: str, classe: str) -> str:
+    return f'{valor_fmt}<span class="vol-badge">{classe}</span>'
+
+
+def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFrame, ticker_atual: str):
     with st.container(border=True):
         ativos = df_cotacoes.columns.tolist()
         idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
@@ -211,18 +231,23 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, ticker_atual: str):
                  "carregado na sidebar.")
 
         precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
-        ultimo = precos_ind_ativo.iloc[-1]
-        preco_atual = float(ultimo["fechamento"])
-        hv_atual = float(ultimo["HV"])
-        iv_pctl_atual = float(ultimo["HV_PCTL"])
+        preco_atual = float(precos_ind_ativo["fechamento"].iloc[-1])
+
+        if ativo_objeto in class_vol.index:
+            lv = class_vol.loc[ativo_objeto]
+            vol_hist_fmt = _badge(f"{lv['Vol_Realizada']:.2f}%", lv["Vol_Hist_class"])
+            iv_rank_fmt = _badge(f"{lv['Vol_Rank']:.2f}%", lv["Vol_Rank_class"])
+            iv_pctl_fmt = _badge(f"{lv['Vol_Percentil']:.2f}%", lv["Vol_Perc_class"])
+        else:
+            vol_hist_fmt = iv_rank_fmt = iv_pctl_fmt = "— (sem linha em class_vol)"
 
         linha1 = "".join([
             gd._card_box("TICKER", ativo_objeto),
             gd._card_box("STRIKE", f"{opcao['strike']:.2f}"),
             gd._card_box("VENCIMENTO", pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")),
             gd._card_box("PREÇO MKT", f"{opcao['preco_mercado']:.2f}"),
-            gd._card_box("IV PERCENTIL", f"{iv_pctl_atual:.2f}%"),
-            gd._card_box("VOL HISTÓRICA", f"{hv_atual:.2f}%"),
+            gd._card_box("IV PERCENTIL", iv_pctl_fmt),
+            gd._card_box("VOL HISTÓRICA", vol_hist_fmt),
         ])
         st.html(f'<div class="boxes-row">{linha1}</div>')
 
@@ -231,7 +256,7 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, ticker_atual: str):
             gd._card_box("CÓDIGO", opcao["codigo"]),
             gd._card_box("D.U.", f"{opcao['dias_uteis']} DIA(S)"),
             gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
-            gd._card_box("IV RANK", f"{iv_pctl_atual:.2f}%"),
+            gd._card_box("IV RANK", iv_rank_fmt),
             gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
         ])
         st.html(f'<div class="boxes-row">{linha2}</div>')
@@ -240,11 +265,10 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, ticker_atual: str):
                          config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
-            f'<div class="disclaimer">IV Percentil / IV Rank de {ativo_objeto}: proxy pelo percentil '
-            f'histórico (janela de 252 pregões) da própria Volatilidade Histórica — df_cotacoes.xlsx '
-            f'só tem preço de fechamento, sem cadeia de opções, então não há IV implícita real pra '
-            f'calcular aqui. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima seguem '
-            f'o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
+            f'<div class="disclaimer">VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: '
+            f'valores e classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> '
+            f'de df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
+            f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
             f'independente do ativo-objeto escolhido nesta caixa.</div>')
 
 
@@ -361,12 +385,16 @@ def main():
     with col_dir:
         try:
             df_cotacoes = carregar_df_cotacoes()
-            _painel_opcao(opcao, df_cotacoes, ticker)
+            class_vol = carregar_class_vol()
+            _painel_opcao(opcao, df_cotacoes, class_vol, ticker)
         except FileNotFoundError:
             st.error(
                 f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. Ele precisa estar "
-                "na raiz do repositório, junto com o streamlit_app.py, pra alimentar o seletor "
-                "de Ativo-objeto.")
+                "na raiz do repositório, junto com o streamlit_app.py.")
+        except ValueError as e:
+            st.error(
+                f"Erro lendo `df_cotacoes.xlsx` — confira se as abas 'cotacoes' e 'class_vol' "
+                f"existem com esses nomes exatos. Detalhe: {e}")
 
     st.sidebar.divider()
     if st.sidebar.button("⬇️ Gerar HTML estático (export)", width='stretch'):
