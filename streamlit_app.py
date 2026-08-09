@@ -112,6 +112,28 @@ def metricas_opcao_cached(cadeia: pd.DataFrame, precos_ind: pd.DataFrame, spot: 
                                       codigo=codigo, diretorio=diretorio)
 
 
+CAMINHO_COTACOES = Path(__file__).resolve().parent / "df_cotacoes.xlsx"
+
+
+@st.cache_data(show_spinner="Carregando universo de ativos (df_cotacoes.xlsx)...")
+def carregar_df_cotacoes() -> pd.DataFrame:
+    """Lê df_cotacoes.xlsx (aba 'cotacoes') da raiz do repo: colunas = tickers,
+    valores = fechamento diário, índice = data (1a coluna do Excel, sem nome)."""
+    df = pd.read_excel(CAMINHO_COTACOES, sheet_name="cotacoes", index_col=0)
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "data"
+    return df
+
+
+@st.cache_data(show_spinner="Calculando RSI e volatilidade histórica do ativo-objeto...")
+def indicadores_ativo_cached(df_cotacoes: pd.DataFrame, ativo: str) -> pd.DataFrame:
+    """Reaproveita m.calcular_indicadores_precos (RSI, HV, HV_PCTL) — só remonta
+    a coluna do ativo escolhido no formato ('data','fechamento') que a função espera."""
+    precos_ativo = df_cotacoes[[ativo]].reset_index()
+    precos_ativo.columns = ["data", "fechamento"]
+    return m.calcular_indicadores_precos(precos_ativo)
+
+
 @st.cache_data(show_spinner="Gerando dados sintéticos de exemplo...")
 def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
     """Gera os 3 CSVs sintéticos (gerar_dados_exemplo.py, inalterado) direto
@@ -179,36 +201,50 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
             'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
 
 
-def _painel_opcao(opcao: dict, precos_ind: pd.DataFrame, ticker: str):
+def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, ticker_atual: str):
     with st.container(border=True):
+        ativos = df_cotacoes.columns.tolist()
+        idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
+        ativo_objeto = st.selectbox(
+            "Ativo-objeto (Preço / Vol. Histórica / RSI)", ativos, index=idx_default,
+            help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
+                 "carregado na sidebar.")
+
+        precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
+        ultimo = precos_ind_ativo.iloc[-1]
+        preco_atual = float(ultimo["fechamento"])
+        hv_atual = float(ultimo["HV"])
+        iv_pctl_atual = float(ultimo["HV_PCTL"])
+
         linha1 = "".join([
-            gd._card_box("TICKER", opcao["ticker"]),
             gd._card_box("STRIKE", f"{opcao['strike']:.2f}"),
             gd._card_box("VENCIMENTO", pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")),
             gd._card_box("PREÇO MKT", f"{opcao['preco_mercado']:.2f}"),
-            gd._card_box("IV PERCENTIL", f"{opcao['iv_percentil']:.2f}%"),
-            gd._card_box("VOL HISTÓRICA", f"{opcao['vol_historica']:.2f}%"),
+            gd._card_box("IV PERCENTIL", f"{iv_pctl_atual:.2f}%"),
+            gd._card_box("VOL HISTÓRICA", f"{hv_atual:.2f}%"),
         ])
         st.html(f'<div class="boxes-row">{linha1}</div>')
 
         linha2 = "".join([
-            gd._card_box("PREÇO", f"{opcao['spot']:.2f}"),
+            gd._card_box("PREÇO", f"{preco_atual:.2f}"),
             gd._card_box("CÓDIGO", opcao["codigo"]),
             gd._card_box("D.U.", f"{opcao['dias_uteis']} DIA(S)"),
             gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
-            gd._card_box("IV RANK", f"{opcao['iv_rank']:.2f}%"),
+            gd._card_box("IV RANK", f"{iv_pctl_atual:.2f}%"),
             gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
         ])
         st.html(f'<div class="boxes-row">{linha2}</div>')
 
-        st.plotly_chart(gd._fig_direita(precos_ind, ticker), width='stretch',
+        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto), width='stretch',
                          config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
-            f'<div class="disclaimer">IV Rank / IV Percentil: {opcao["fonte_iv_rank"]} '
-            f'&mdash; log local com {opcao["n_obs_log_iv"]} observação(ões) para o contrato '
-            f'{opcao["codigo"]}. Passa a usar IV real do contrato assim que o log acumular '
-            f'30+ execuções.</div>')
+            f'<div class="disclaimer">IV Percentil / IV Rank de {ativo_objeto}: proxy pelo percentil '
+            f'histórico (janela de 252 pregões) da própria Volatilidade Histórica — df_cotacoes.xlsx '
+            f'só tem preço de fechamento, sem cadeia de opções, então não há IV implícita real pra '
+            f'calcular aqui. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima seguem '
+            f'o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
+            f'independente do ativo-objeto escolhido nesta caixa.</div>')
 
 
 # ----------------------------------------------------------------------------
@@ -322,7 +358,14 @@ def main():
     with col_esq:
         _painel_gex(gex, ticker, data_ref)
     with col_dir:
-        _painel_opcao(opcao, precos_ind, ticker)
+        try:
+            df_cotacoes = carregar_df_cotacoes()
+            _painel_opcao(opcao, df_cotacoes, ticker)
+        except FileNotFoundError:
+            st.error(
+                f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. Ele precisa estar "
+                "na raiz do repositório, junto com o streamlit_app.py, pra alimentar o seletor "
+                "de Ativo-objeto.")
 
     st.sidebar.divider()
     if st.sidebar.button("⬇️ Gerar HTML estático (export)", width='stretch'):
