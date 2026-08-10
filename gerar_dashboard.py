@@ -9,7 +9,7 @@ CORES = {
     "fundo": "#0b0e14", "painel": "#12161f", "borda": "#232838",
     "texto": "#e6e9f0", "fraco": "#8a91a3",
     "alta": "#2fd48b", "baixa": "#ef5b5b", "neutro": "#f2b632", "accent": "#5b8def",
-    "roxo": "#c25bef",
+    "roxo": "#c25bef", "rosa": "#e0568c",
 }
 
 
@@ -78,6 +78,28 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
 
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["fechamento"], name="Preço",
                               line=dict(color=CORES["neutro"], width=1.6)), row=1, col=1)
+
+    if bandas is not None:
+        close = precos_ind["fechamento"].reindex(bandas.index)
+        std = bandas["banda+1"] - bandas["banda_0"]
+        desvio = (close - bandas["banda_0"]) / std
+
+        # Prioridade roxo > azul > rosa (faixas se sobrepõem; cada ponto recebe só a cor mais extrema)
+        mask_roxo = (desvio >= 3) | (desvio <= -3)
+        mask_azul = ~mask_roxo & ((desvio >= 1) | (desvio <= -2))
+        mask_rosa = ~mask_roxo & ~mask_azul & ((desvio >= 1) | (desvio <= -1))
+
+        for mask, cor, nome in (
+            (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
+            (mask_azul, CORES["accent"], "≥1σ / ≤-2σ"),
+            (mask_rosa, CORES["rosa"], "≥1σ / ≤-1σ"),
+        ):
+            if mask.any():
+                fig.add_trace(go.Scatter(
+                    x=close.index[mask], y=close[mask], mode="markers", name=nome,
+                    marker=dict(color=cor, size=6, line=dict(color=CORES["fundo"], width=0.5)),
+                    showlegend=False,
+                ), row=1, col=1)
 
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["HV"], name="Vol. Histórica",
                               line=dict(color=CORES["accent"], width=1.6)), row=2, col=1)
