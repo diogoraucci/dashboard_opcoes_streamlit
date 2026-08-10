@@ -86,14 +86,13 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
 
         # Prioridade roxo > azul > rosa (faixas se sobrepõem; cada ponto recebe só a cor mais extrema)
         mask_roxo = (desvio >= 3) | (desvio <= -3)
-        mask_azul = ((desvio >= 2) & (desvio < 3)) | ((desvio <= -2) & (desvio > -3))
-        mask_rosa = ((desvio >= 1) & (desvio < 2)) | ((desvio <= -1) & (desvio > -2))
+        mask_azul = ~mask_roxo & ((desvio >= 1) | (desvio <= -2))
+        mask_rosa = ~mask_roxo & ~mask_azul & ((desvio >= 1) | (desvio <= -1))
 
         for mask, cor, nome in (
-            (mask_rosa, CORES["rosa"], "≥1σ e <2σ / ≥-2σ e <-1σ"),
-            (mask_azul, CORES["accent"], "≥2σ e <3σ / ≥-2σ e <-3σ"),
             (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
-            
+            (mask_azul, CORES["accent"], "≥1σ / ≤-2σ"),
+            (mask_rosa, CORES["rosa"], "≥1σ / ≤-1σ"),
         ):
             if mask.any():
                 fig.add_trace(go.Scatter(
