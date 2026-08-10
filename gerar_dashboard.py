@@ -90,9 +90,10 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
         mask_rosa = ~mask_roxo & ~mask_azul & ((desvio >= 1) | (desvio <= -1))
 
         for mask, cor, nome in (
-            (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
-            (mask_azul, CORES["accent"], "≥2σ / ≤-2σ"),
             (mask_rosa, CORES["rosa"], "≥1σ / ≤-1σ"),
+            (mask_azul, CORES["accent"], "≥2σ / ≤-2σ"),
+            (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
+            
         ):
             if mask.any():
                 fig.add_trace(go.Scatter(
