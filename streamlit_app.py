@@ -168,6 +168,26 @@ def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
     params.to_csv(Path(diretorio, "parametros.csv"), index=False)
 
 
+@st.cache_data(show_spinner="Calculando bandas de desvio-padrão...")
+def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int) -> pd.DataFrame:
+    """Porta a lógica 'NoTrend' do script OMSF enviado: baseline = EMA(period) do
+    fechamento; Close_NoTrend = fechamento - baseline; std = desvio-padrão de
+    Close_NoTrend sobre a série INTEIRA (não é rolling — replica o código original
+    fielmente); banda_0 = baseline, banda±N = baseline ± N*std, projetadas de
+    volta na escala de preço."""
+    close = precos_ind_ativo["fechamento"]
+    baseline = close.ewm(span=period, adjust=False).mean()
+    close_no_trend = close - baseline
+    std = close_no_trend.std()
+
+    bandas = pd.DataFrame(index=precos_ind_ativo.index)
+    bandas["banda_0"] = baseline
+    for n in (1, 2, 3):
+        bandas[f"banda+{n}"] = baseline + std * n
+        bandas[f"banda-{n}"] = baseline - std * n
+    return bandas
+
+
 # ----------------------------------------------------------------------------
 # PAINÉIS — mesma composição de gd.gerar_dashboard(), só que renderizando
 # nativamente (st.plotly_chart) em vez de embutir fig.to_html().
@@ -235,13 +255,20 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
     with st.container(border=True):
         ativos = df_cotacoes.columns.tolist()
         idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
-        ativo_objeto = st.selectbox(
-            "Ativo-objeto (Preço / Vol. Histórica / RSI)", ativos, index=idx_default,
-            help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
-                 "carregado na sidebar.")
+
+        col_ativo, col_period = st.columns(2)
+        with col_ativo:
+            ativo_objeto = st.selectbox(
+                "Ativo-objeto", ativos, index=idx_default,
+                help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
+                     "carregado na sidebar.")
+        with col_period:
+            period = st.slider("Period (EMA baseline p/ bandas)", min_value=20, max_value=300,
+                                value=50, step=5)
 
         precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
         preco_atual = float(precos_ind_ativo["fechamento"].iloc[-1])
+        bandas = bandas_desvio_padrao_cached(precos_ind_ativo, period)
 
         if ativo_objeto in class_vol.index:
             lv = class_vol.loc[ativo_objeto]
@@ -271,13 +298,16 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
         ])
         st.html(f'<div class="boxes-row">{linha2}</div>')
 
-        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto), width='stretch',
+        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), width='stretch',
                          config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
-            f'<div class="disclaimer">VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: '
-            f'valores e classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> '
-            f'de df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
+            f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = EMA({period}) '
+            f'de {ativo_objeto}; bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão de '
+            f'(preço &minus; baseline), calculado sobre a série toda — portado do script OMSF/NoTrend '
+            f'que você enviou. VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
+            f'classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
+            f'df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
             f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
             f'independente do ativo-objeto escolhido nesta caixa.</div>')
 
