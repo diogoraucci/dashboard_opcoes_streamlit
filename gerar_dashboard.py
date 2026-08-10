@@ -53,12 +53,28 @@ def _fig_gex_profile(gex: dict, ticker: str):
 # GRÁFICOS 2-4: Preço / Volatilidade / RSI (painel direito)
 # ----------------------------------------------------------------------------
 
-def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "Volatilidade Histórica (21 dias)"):
+def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "Volatilidade Histórica (21 dias)",
+                  bandas: pd.DataFrame = None):
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.42, 0.28, 0.30],
         subplot_titles=(f"{ticker} — Preço", fonte_vol_nome + " - Baseada em Retornos", "RSI (14) calculado sobre os Retornos"),
     )
+
+    if bandas is not None:
+        # bandas verdes/vermelhas (± 1/2/3 desvios-padrão), sem entrada própria na legenda
+        for n in (3, 2, 1):
+            fig.add_trace(go.Scatter(x=bandas.index, y=bandas[f"banda-{n}"], name=f"Banda -{n}",
+                                      line=dict(color=CORES["baixa"], width=1, dash="dot"),
+                                      opacity=0.35 + 0.15 * (3 - n), showlegend=False), row=1, col=1)
+        for n in (1, 2, 3):
+            fig.add_trace(go.Scatter(x=bandas.index, y=bandas[f"banda+{n}"], name=f"Banda +{n}",
+                                      line=dict(color=CORES["alta"], width=1, dash="dot"),
+                                      opacity=0.35 + 0.15 * (3 - n), showlegend=False), row=1, col=1)
+        # baseline (azul) por cima das bandas
+        fig.add_trace(go.Scatter(x=bandas.index, y=bandas["banda_0"], name="Baseline (EMA)",
+                                  line=dict(color=CORES["accent"], width=1.4, dash="dash"),
+                                  showlegend=False), row=1, col=1)
 
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["fechamento"], name="Preço",
                               line=dict(color=CORES["neutro"], width=1.6)), row=1, col=1)
