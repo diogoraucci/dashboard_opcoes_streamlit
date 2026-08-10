@@ -228,8 +228,8 @@ def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
         st.html('<div class="subtitulo">Significant GEX Zones</div>')
         st.html(gd._tabela_zonas(gex["zonas_significativas"]))
 
-        st.plotly_chart(gd._fig_gex_profile(gex, ticker), width='stretch',
-                         config={"displayModeBar": False}, key="fig_gex")
+        st.plotly_chart(gd._fig_gex_profile(gex, ticker), use_container_width=True,
+                 config={"displayModeBar": False}, key="fig_gex")
 
         st.html(
             '<div class="disclaimer">Convenção assumida: dealers líquidos COMPRADOS em calls e '
@@ -298,8 +298,8 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
         ])
         st.html(f'<div class="boxes-row">{linha2}</div>')
 
-        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), width='stretch',
-                         config={"displayModeBar": False}, key="fig_direita")
+        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), use_container_width=True,
+                 config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
             f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = EMA({period}) '
@@ -422,7 +422,7 @@ def main():
     col_esq, col_dir = st.columns(2, gap="large")
     with col_esq:
         _painel_gex(gex, ticker, data_ref)
-    with col_dir:
+    with col_dir:''
         try:
             df_cotacoes = carregar_df_cotacoes()
             class_vol = carregar_class_vol()
