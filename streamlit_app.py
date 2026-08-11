@@ -1,14 +1,20 @@
 """
 streamlit_app.py — Dashboard de Opções (GEX + métricas de contrato), versão Streamlit.
 
-Reaproveita 100% da engine de cálculo e dos gráficos originais:
+Reaproveita a engine de cálculo e a maior parte dos gráficos originais:
   - motor_calculo.py  -> NÃO foi alterado. Continua sendo o motor de cálculo puro
                          (GEX, walls, gamma flip, PCR, IV skew, RSI, HV, Black-Scholes).
-  - gerar_dashboard.py -> NÃO foi alterado. Suas funções `_fig_gex_profile`,
-                         `_fig_direita`, `_card`, `_card_box`, `_tabela_pin_candidates`
-                         e `_tabela_zonas` são importadas e reaproveitadas na íntegra,
-                         então os dois painéis mantêm exatamente o mesmo visual
-                         (cores, cards, tabelas) da versão HTML estática. A função
+  - gerar_dashboard.py -> recebeu só 2 ajustes pontuais dentro de `_fig_direita`:
+                         (1) o desvio-padrão que colore os marcadores agora vem do
+                         ZScore em espaço log calculado em `bandas_desvio_padrao_cached`
+                         (mais correto, já que as bandas em R$ deixaram de ser
+                         simétricas); (2) esses marcadores usam uma paleta separada
+                         (`CORES_DESVIO_MARCADORES`) com cores mais luminosas, sem
+                         mexer na paleta `CORES` compartilhada com o resto do
+                         dashboard. `_fig_gex_profile`, `_card`, `_card_box`,
+                         `_tabela_pin_candidates` e `_tabela_zonas` seguem idênticos,
+                         então os dois painéis mantêm o mesmo visual geral (cores,
+                         cards, tabelas) da versão HTML estática. A função
                          `gerar_dashboard()` original continua disponível para exportar
                          o HTML estático como download, se você quiser manter esse uso.
 
@@ -25,6 +31,7 @@ Rodar localmente:
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -169,22 +176,39 @@ def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
 
 
 @st.cache_data(show_spinner="Calculando bandas de desvio-padrão...")
-def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int) -> pd.DataFrame:
-    """Porta a lógica 'NoTrend' do script OMSF enviado: baseline = EMA(period) do
-    fechamento; Close_NoTrend = fechamento - baseline; std = desvio-padrão de
-    Close_NoTrend sobre a série INTEIRA (não é rolling — replica o código original
-    fielmente); banda_0 = baseline, banda±N = baseline ± N*std, projetadas de
-    volta na escala de preço."""
+def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int,
+                                 janela_std: int = 252) -> pd.DataFrame:
+    """Porta a lógica do script de normalização logarítmica enviado (o que
+    substitui a versão anterior baseada em EMA + std da série inteira):
+      - preco_base = primeiro fechamento da série; log_close = log(fechamento / preco_base)
+      - MM_NoTrend = média móvel SIMPLES (rolling) de log_close, janela = period
+        (valor do slider "Period (MM baseline p/ bandas)" — no script original a
+        janela vinha fixa em 90)
+      - Close_NoTrend = log_close - MM_NoTrend
+      - STD = desvio-padrão MÓVEL (rolling, janela = janela_std, default 252
+        pregões) de Close_NoTrend — antes era o desvio-padrão da série INTEIRA,
+        agora é uma janela móvel, igual ao script enviado
+      - ZScore = Close_NoTrend / STD (usado pelos marcadores de desvio no gráfico)
+    Baseline e bandas são projetadas de volta pra escala de preço (R$) via
+    preco_base * exp(...), pra continuar plotando sobre o preço real. Por
+    estarem em espaço log, as bandas ficam multiplicativas — ou seja, NÃO
+    simétricas em R$ ao redor da baseline —, o que é mais correto pra preços
+    (a volatilidade em R$ tende a crescer com o nível do preço)."""
     close = precos_ind_ativo["fechamento"]
-    baseline = close.ewm(span=period, adjust=False).mean()
-    close_no_trend = close - baseline
-    std = close_no_trend.std()
+    preco_base = close.iloc[0]
+    log_close = np.log(close / preco_base)
+
+    mm_no_trend = log_close.rolling(period).mean()
+    close_no_trend = log_close - mm_no_trend
+    std = close_no_trend.rolling(janela_std).std()
+    zscore = close_no_trend / std
 
     bandas = pd.DataFrame(index=precos_ind_ativo.index)
-    bandas["banda_0"] = baseline
+    bandas["banda_0"] = preco_base * np.exp(mm_no_trend)
     for n in (1, 2, 3):
-        bandas[f"banda+{n}"] = baseline + std * n
-        bandas[f"banda-{n}"] = baseline - std * n
+        bandas[f"banda+{n}"] = preco_base * np.exp(mm_no_trend + std * n)
+        bandas[f"banda-{n}"] = preco_base * np.exp(mm_no_trend - std * n)
+    bandas["zscore"] = zscore
     return bandas
 
 
@@ -263,8 +287,11 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
                 help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
                      "carregado na sidebar.")
         with col_period:
-            period = st.slider("Period (EMA baseline p/ bandas)", min_value=20, max_value=300,
-                                value=50, step=5)
+            period = st.slider(
+                "Period (MM baseline p/ bandas)", min_value=20, max_value=300,
+                value=50, step=5,
+                help="Janela da média móvel simples aplicada ao log-preço normalizado "
+                     "(log(fechamento / fechamento inicial da série)).")
 
         precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
         preco_atual = float(precos_ind_ativo["fechamento"].iloc[-1])
@@ -302,10 +329,13 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
                  config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
-            f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = EMA({period}) '
-            f'de {ativo_objeto}; bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão de '
-            f'(preço &minus; baseline), calculado sobre a série toda — portado do script OMSF/NoTrend '
-            f'que você enviou. VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
+            f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = média móvel '
+            f'simples de {period} períodos sobre o log-preço normalizado '
+            f'(log(fechamento / fechamento inicial da série)) de {ativo_objeto}; bandas '
+            f'verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão MÓVEIS (janela de 252 '
+            f'pregões) da distância log-preço &minus; baseline, projetadas de volta pra escala de '
+            f'preço (R$) via exponencial — adaptado do script de normalização logarítmica que você '
+            f'enviou. VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
             f'classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
             f'df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
             f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
@@ -422,7 +452,7 @@ def main():
     col_esq, col_dir = st.columns(2, gap="large")
     with col_esq:
         _painel_gex(gex, ticker, data_ref)
-    with col_dir:''
+    with col_dir:
         try:
             df_cotacoes = carregar_df_cotacoes()
             class_vol = carregar_class_vol()
