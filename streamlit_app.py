@@ -422,7 +422,7 @@ def main():
     col_esq, col_dir = st.columns(2, gap="large")
     with col_esq:
         _painel_gex(gex, ticker, data_ref)
-    with col_dir:
+    with col_dir:''
         try:
             df_cotacoes = carregar_df_cotacoes()
             class_vol = carregar_class_vol()
