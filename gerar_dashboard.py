@@ -53,12 +53,30 @@ def _fig_gex_profile(gex: dict, ticker: str):
 # GRÁFICOS 2-4: Preço / Volatilidade / RSI (painel direito)
 # ----------------------------------------------------------------------------
 
+def _rolling_percentis(serie: pd.Series, janela: int = 252, p_baixo: float = 0.2, p_alto: float = 0.8):
+    """Percentis móveis (rolling) de uma série (ex.: HV ou RSI), calculados sobre uma
+    janela de `janela` períodos (padrão: 252, ~1 ano útil de pregões).
+
+    `min_periods` menor que a janela cheia permite que as faixas P20/P80 já apareçam
+    no início da série, mesmo antes de existirem 252 observações — evita um trecho
+    inicial todo em branco (NaN) no gráfico.
+    """
+    min_periodos = max(20, janela // 5)
+    p20 = serie.rolling(janela, min_periods=min_periodos).quantile(p_baixo)
+    p80 = serie.rolling(janela, min_periods=min_periodos).quantile(p_alto)
+    return p20, p80
+
+
 def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "Volatilidade Histórica (21 dias)",
-                  bandas: pd.DataFrame = None):
+                  bandas: pd.DataFrame = None, janela_percentil: int = 252):
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.42, 0.28, 0.30],
-        subplot_titles=(f"{ticker} — Preço", fonte_vol_nome + " - Baseada em Retornos", "RSI (14) calculado sobre os Retornos"),
+        subplot_titles=(
+            f"{ticker} — Preço",
+            fonte_vol_nome + f" - Baseada em Retornos (com P20/P80 móveis, janela {janela_percentil})",
+            f"RSI (14) calculado sobre os Retornos (com P20/P80 móveis, janela {janela_percentil})",
+        ),
     )
 
     if bandas is not None:
@@ -104,10 +122,48 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["HV"], name="Vol. Histórica",
                               line=dict(color=CORES["accent"], width=1.6)), row=2, col=1)
 
+    # Faixas de percentil móvel (rolling, janela 252) sobre a própria série de HV:
+    # ajudam a contextualizar se a vol. atual está "cara" (perto/acima do P80) ou
+    # "barata" (perto/abaixo do P20) frente ao próprio histórico recente do ativo.
+    hv_p20, hv_p80 = _rolling_percentis(precos_ind["HV"], janela_percentil)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=hv_p80, name=f"HV P80 (rolling {janela_percentil})",
+                              line=dict(color=CORES["roxo"], width=1, dash="dot"),
+                              showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=hv_p20, name=f"HV P20 (rolling {janela_percentil})",
+                              line=dict(color=CORES["rosa"], width=1, dash="dot"),
+                              showlegend=False), row=2, col=1)
+    if pd.notna(hv_p80.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=hv_p80.iloc[-1], xref="x2", yref="y2",
+                            text="P80", showarrow=False, font=dict(size=9, color=CORES["roxo"]),
+                            xanchor="left", xshift=8)
+    if pd.notna(hv_p20.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=hv_p20.iloc[-1], xref="x2", yref="y2",
+                            text="P20", showarrow=False, font=dict(size=9, color=CORES["rosa"]),
+                            xanchor="left", xshift=8)
+
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["RSI"], name="RSI",
                               line=dict(color="#e0568c", width=1.6)), row=3, col=1)
     fig.add_hline(y=70, line=dict(color=CORES["accent"], width=1, dash="dot"), row=3, col=1)
     fig.add_hline(y=30, line=dict(color=CORES["roxo"], width=1, dash="dot"), row=3, col=1)
+
+    # Mesma lógica de faixas P20/P80 móveis (janela 252), agora sobre o RSI —
+    # complementa as linhas fixas de sobrecompra/sobrevenda (70/30) com um limiar
+    # que se adapta ao comportamento recente do próprio ativo.
+    rsi_p20, rsi_p80 = _rolling_percentis(precos_ind["RSI"], janela_percentil)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=rsi_p80, name=f"RSI P80 (rolling {janela_percentil})",
+                              line=dict(color=CORES["roxo"], width=1, dash="dot"),
+                              showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=rsi_p20, name=f"RSI P20 (rolling {janela_percentil})",
+                              line=dict(color=CORES["rosa"], width=1, dash="dot"),
+                              showlegend=False), row=3, col=1)
+    if pd.notna(rsi_p80.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=rsi_p80.iloc[-1], xref="x3", yref="y3",
+                            text="P80", showarrow=False, font=dict(size=9, color=CORES["roxo"]),
+                            xanchor="left", xshift=8)
+    if pd.notna(rsi_p20.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=rsi_p20.iloc[-1], xref="x3", yref="y3",
+                            text="P20", showarrow=False, font=dict(size=9, color=CORES["rosa"]),
+                            xanchor="left", xshift=8)
 
     fig.update_layout(
         template="plotly_dark", paper_bgcolor=CORES["fundo"], plot_bgcolor=CORES["painel"],
