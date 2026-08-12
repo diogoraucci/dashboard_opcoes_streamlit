@@ -12,16 +12,6 @@ CORES = {
     "roxo": "#c25bef", "rosa": "#e0568c",
 }
 
-# Versões mais luminosas de rosa/accent/roxo, usadas SÓ nos marcadores de
-# desvio-padrão (±1/2/3σ) do gráfico de Preço em _fig_direita. Propositalmente
-# separadas de CORES: mudar essas 3 não deve afetar Call Wall, baseline, RSI,
-# Vol. Histórica etc., que continuam usando CORES normalmente.
-CORES_DESVIO_MARCADORES = {
-    "rosa": "#ff5fa8",  # era CORES["rosa"]   #e0568c
-    "azul": "#4cabff",  # era CORES["accent"] #5b8def
-    "roxo": "#d370ff",  # era CORES["roxo"]   #c25bef
-}
-
 
 # ----------------------------------------------------------------------------
 # GRÁFICO 1: Perfil de GEX (painel esquerdo)
@@ -82,7 +72,7 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
                                       line=dict(color=CORES["alta"], width=1, dash="dot"),
                                       opacity=0.35 + 0.15 * (3 - n), showlegend=False), row=1, col=1)
         # baseline (azul) por cima das bandas
-        fig.add_trace(go.Scatter(x=bandas.index, y=bandas["banda_0"], name="Baseline (MM)",
+        fig.add_trace(go.Scatter(x=bandas.index, y=bandas["banda_0"], name="Baseline (EMA)",
                                   line=dict(color=CORES["accent"], width=1.4, dash="dash"),
                                   showlegend=False), row=1, col=1)
 
@@ -91,26 +81,18 @@ def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "V
 
     if bandas is not None:
         close = precos_ind["fechamento"].reindex(bandas.index)
-        if "zscore" in bandas.columns:
-            # Z-Score já vem calculado no espaço log-normalizado (mais correto
-            # aqui, já que as bandas em R$ agora são multiplicativas/assimétricas
-            # em torno da baseline, então "banda+1 - banda_0" não é mais igual
-            # a "banda_0 - banda-1")
-            desvio = bandas["zscore"].reindex(close.index)
-        else:
-            std = bandas["banda+1"] - bandas["banda_0"]
-            desvio = (close - bandas["banda_0"]) / std
+        std = bandas["banda+1"] - bandas["banda_0"]
+        desvio = (close - bandas["banda_0"]) / std
 
         # Prioridade roxo > azul > rosa (faixas se sobrepõem; cada ponto recebe só a cor mais extrema)
         mask_roxo = (desvio >= 3) | (desvio <= -3)
-        mask_azul = ((desvio >= 2) & (desvio < 3)) | ((desvio <= -2) & (desvio > -3))
-        mask_rosa = ((desvio >= 1) & (desvio < 2)) | ((desvio <= -1) & (desvio > -2))
+        mask_azul = ~mask_roxo & ((desvio >= 1) | (desvio <= -2))
+        mask_rosa = ~mask_roxo & ~mask_azul & ((desvio >= 1) | (desvio <= -1))
 
         for mask, cor, nome in (
-            (mask_rosa, CORES_DESVIO_MARCADORES["rosa"], "≥1σ e <2σ / ≥-2σ e <-1σ"),
-            (mask_azul, CORES_DESVIO_MARCADORES["azul"], "≥2σ e <3σ / ≥-2σ e <-3σ"),
-            (mask_roxo, CORES_DESVIO_MARCADORES["roxo"], "≥3σ / ≤-3σ"),
-
+            (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
+            (mask_azul, CORES["accent"], "≥1σ / ≤-2σ"),
+            (mask_rosa, CORES["rosa"], "≥1σ / ≤-1σ"),
         ):
             if mask.any():
                 fig.add_trace(go.Scatter(
