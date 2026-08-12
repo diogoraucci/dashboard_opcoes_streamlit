@@ -25,6 +25,7 @@ Rodar localmente:
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -170,21 +171,37 @@ def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
 
 @st.cache_data(show_spinner="Calculando bandas de desvio-padrão...")
 def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int) -> pd.DataFrame:
-    """Porta a lógica 'NoTrend' do script OMSF enviado: baseline = EMA(period) do
-    fechamento; Close_NoTrend = fechamento - baseline; std = desvio-padrão de
-    Close_NoTrend sobre a série INTEIRA (não é rolling — replica o código original
-    fielmente); banda_0 = baseline, banda±N = baseline ± N*std, projetadas de
-    volta na escala de preço."""
-    close = precos_ind_ativo["fechamento"]
-    baseline = close.ewm(span=period, adjust=False).mean()
-    close_no_trend = close - baseline
-    std = close_no_trend.std()
+    """Porta fielmente a lógica do script OMSF/NoTrend enviado:
 
-    bandas = pd.DataFrame(index=precos_ind_ativo.index)
-    bandas["banda_0"] = baseline
+      1) Normalização logarítmica do fechamento: log(close / close[0]).
+      2) MM_NoTrend = média móvel SIMPLES (rolling), agora com janela = `period`
+         (o slider "Period (EMA baseline p/ bandas)" — deixou de ser EMA e
+         passou a ser a mesma rolling mean do script original, só que com
+         janela ajustável em vez do 90 fixo).
+      3) Close_NoTrend = log-close - MM_NoTrend.
+      4) STD = desvio-padrão ROLLING (janela 252, como no script original) de
+         Close_NoTrend — portanto, como STD é calculado em cima de
+         Close_NoTrend, ele muda automaticamente junto com `period`.
+      5) Bandas = MM_NoTrend ± N*STD, calculadas em escala log e depois
+         projetadas de volta pra escala de preço (R$) via exp(), pra continuar
+         sobrepondo corretamente o gráfico de preço existente.
+    """
+    close = precos_ind_ativo["fechamento"]
+    preco_base = close.iloc[0]
+
+    log_close = np.log(close / preco_base)
+    mm_no_trend = log_close.rolling(period).mean()
+    close_no_trend = log_close - mm_no_trend
+    std = close_no_trend.rolling(252).std()
+
+    bandas_log = pd.DataFrame(index=precos_ind_ativo.index)
+    bandas_log["banda_0"] = mm_no_trend
     for n in (1, 2, 3):
-        bandas[f"banda+{n}"] = baseline + std * n
-        bandas[f"banda-{n}"] = baseline - std * n
+        bandas_log[f"banda+{n}"] = mm_no_trend + std * n
+        bandas_log[f"banda-{n}"] = mm_no_trend - std * n
+
+    # volta pra escala de preço (R$): preco = preco_base * exp(log_normalizado)
+    bandas = np.exp(bandas_log) * preco_base
     return bandas
 
 
@@ -302,10 +319,13 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
                  config={"displayModeBar": False}, key="fig_direita")
 
         st.html(
-            f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = EMA({period}) '
-            f'de {ativo_objeto}; bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão de '
-            f'(preço &minus; baseline), calculado sobre a série toda — portado do script OMSF/NoTrend '
-            f'que você enviou. VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
+            f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = média móvel '
+            f'simples de {period} períodos sobre o log-preço normalizado de {ativo_objeto} '
+            f'(equivalente ao MM_NoTrend do script OMSF/NoTrend, só que com janela ajustável em vez '
+            f'do rolling(90) fixo); bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão '
+            f'ROLLING (janela 252) de (log-preço &minus; baseline), depois convertidas de volta pra '
+            f'escala de preço (R$) — replica fielmente o script OMSF/NoTrend que você enviou. '
+            f'VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
             f'classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
             f'df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
             f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
