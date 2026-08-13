@@ -151,6 +151,33 @@ def carregar_class_vol() -> pd.DataFrame:
     return df.set_index("ticker")
 
 
+CAMINHO_OPCOES = Path(__file__).resolve().parent / "df_opcoes.xlsx"
+
+
+@st.cache_data(show_spinner="Carregando cadeia de opções real (df_opcoes.xlsx)...")
+def carregar_df_opcoes(ativo_objeto: str) -> pd.DataFrame:
+    """Lê df_opcoes.xlsx, aba 'opcoes_{ativo_objeto}' — snapshot real da cadeia de
+    opções do ativo-objeto selecionado (raspagem OPCOES.NET). Colunas esperadas
+    nessa aba: 'Ticker' (código da opção, ex: PETR4G0360), 'Strike', 'Último'
+    (preço de mercado), 'Dias úteis' (até o vencimento) e 'Tipo' (CALL/PUT).
+    Se a aba não existir para o ativo pedido, o pandas levanta ValueError —
+    tratado no call site."""
+    df = pd.read_excel(CAMINHO_OPCOES, sheet_name=f"opcoes_{ativo_objeto}")
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")])
+    return df
+
+
+def _vencimento_por_dias_uteis(dias_uteis) -> pd.Timestamp:
+    """Data de hoje + `dias_uteis` dias ÚTEIS (sem calendário de feriados —
+    mesma convenção 'só fins de semana' usada em motor_calculo.dias_uteis_ate,
+    que usa np.busday_count puro). dias_uteis<=0 -> hoje."""
+    hoje = pd.Timestamp.today().normalize()
+    du = int(dias_uteis)
+    if du <= 0:
+        return hoje
+    return hoje + pd.tseries.offsets.BDay(du)
+
+
 @st.cache_data(show_spinner="Gerando dados sintéticos de exemplo...")
 def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
     """Gera os 3 CSVs sintéticos (gerar_dados_exemplo.py, inalterado) direto
@@ -273,14 +300,39 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
         ativos = df_cotacoes.columns.tolist()
         idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
 
-        col_ativo, col_period = st.columns(2)
+        col_ativo, col_codigo, col_period = st.columns([1.1, 1.3, 0.9])
         with col_ativo:
             ativo_objeto = st.selectbox(
                 "Ativo-objeto", ativos, index=idx_default,
-                help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
-                     "carregado na sidebar.")
+                help="Universo de df_cotacoes.xlsx (aba 'cotacoes') — independente do ticker/cadeia "
+                     "de opções carregado na sidebar.")
+
+        # -- Cadeia de opções REAL do ativo-objeto (df_opcoes.xlsx, aba
+        # 'opcoes_{ativo_objeto}'). O seletor CÓDIGO é montado a partir da
+        # coluna 'Ticker' dessa aba, igual ao seletor Ativo-objeto é montado
+        # a partir das colunas de df_cotacoes.xlsx.
+        linha_opcao = None
+        try:
+            df_opcoes_ativo = carregar_df_opcoes(ativo_objeto)
+        except FileNotFoundError:
+            df_opcoes_ativo = None
+        except ValueError:
+            # aba 'opcoes_{ativo_objeto}' não existe pra esse ativo
+            df_opcoes_ativo = None
+
+        with col_codigo:
+            if df_opcoes_ativo is not None and "Ticker" in df_opcoes_ativo.columns and len(df_opcoes_ativo):
+                codigos_opcao = sorted(df_opcoes_ativo["Ticker"].astype(str).unique())
+                codigo_opcao_sel = st.selectbox(
+                    "CÓDIGO", codigos_opcao, key=f"codigo_opcao_{ativo_objeto}",
+                    help=f"Contratos da aba 'opcoes_{ativo_objeto}' em df_opcoes.xlsx.")
+                linha_opcao = df_opcoes_ativo.loc[
+                    df_opcoes_ativo["Ticker"].astype(str) == codigo_opcao_sel].iloc[0]
+            else:
+                st.selectbox("CÓDIGO", ["— sem aba opcoes_" + ativo_objeto + " —"], disabled=True)
+
         with col_period:
-            period = st.slider("Period (EMA baseline p/ bandas)", min_value=20, max_value=300,
+            period = st.slider("Period (baseline p/ bandas)", min_value=20, max_value=300,
                                 value=50, step=5)
 
         precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
@@ -295,22 +347,42 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
         else:
             vol_hist_fmt = iv_rank_fmt = iv_pctl_fmt = "— (sem linha em class_vol)"
 
+        # Campos preenchidos a partir do contrato REAL selecionado em CÓDIGO
+        # (df_opcoes.xlsx). Se a aba não existir para o ativo, cai de volta
+        # pro contrato sintético/CSV (`opcao`) selecionado na sidebar, só pra
+        # o painel não quebrar.
+        if linha_opcao is not None:
+            codigo_fmt = str(linha_opcao["Ticker"])
+            strike_fmt = f"{float(linha_opcao['Strike']):.2f}"
+            preco_mkt_fmt = f"{float(linha_opcao['Último']):.2f}"
+            du_fmt = f"{int(linha_opcao['Dias úteis'])} DIA(S)"
+            vencimento_fmt = _vencimento_por_dias_uteis(linha_opcao["Dias úteis"]).strftime("%d-%m-%Y")
+            tipo_fmt = str(linha_opcao["Tipo"]).upper()
+        else:
+            codigo_fmt = opcao["codigo"]
+            strike_fmt = f"{opcao['strike']:.2f}"
+            preco_mkt_fmt = f"{opcao['preco_mercado']:.2f}"
+            du_fmt = f"{opcao['dias_uteis']} DIA(S)"
+            vencimento_fmt = pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")
+            tipo_fmt = opcao["tipo"]
+
         linha1 = "".join([
             gd._card_box("TICKER", ativo_objeto),
-            gd._card_box("STRIKE", f"{opcao['strike']:.2f}"),
-            gd._card_box("VENCIMENTO", pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")),
-            gd._card_box("PREÇO MKT", f"{opcao['preco_mercado']:.2f}"),
-            gd._card_box("IV PERCENTIL", iv_pctl_fmt),
-            gd._card_box("VOL HISTÓRICA", vol_hist_fmt),
+            gd._card_box("CÓDIGO", codigo_fmt),
+            gd._card_box("TIPO", tipo_fmt),
+            gd._card_box("STRIKE", strike_fmt),
+            gd._card_box("VENCIMENTO", vencimento_fmt),
+            gd._card_box("D.U.", du_fmt),
         ])
         st.html(f'<div class="boxes-row">{linha1}</div>')
 
         linha2 = "".join([
             gd._card_box("PREÇO", f"{preco_atual:.2f}"),
-            gd._card_box("CÓDIGO", opcao["codigo"]),
-            gd._card_box("D.U.", f"{opcao['dias_uteis']} DIA(S)"),
+            gd._card_box("PREÇO MKT", preco_mkt_fmt),
             gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
+            gd._card_box("IV PERCENTIL", iv_pctl_fmt),
             gd._card_box("IV RANK", iv_rank_fmt),
+            gd._card_box("VOL HISTÓRICA", vol_hist_fmt),
             gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
         ])
         st.html(f'<div class="boxes-row">{linha2}</div>')
@@ -327,9 +399,12 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
             f'escala de preço (R$) — replica fielmente o script OMSF/NoTrend que você enviou. '
             f'VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
             f'classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
-            f'df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
-            f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
-            f'independente do ativo-objeto escolhido nesta caixa.</div>')
+            f'df_cotacoes.xlsx. CÓDIGO / TIPO / STRIKE / VENCIMENTO / D.U. / PREÇO MKT acima vêm do '
+            f'contrato selecionado em "CÓDIGO", lido em tempo real da aba '
+            f'<code>opcoes_{ativo_objeto}</code> de df_opcoes.xlsx (VENCIMENTO = hoje + D.U. dias '
+            f'úteis, sem calendário de feriados). PREÇO TEÓRICO / VOL IMPLÍCITA continuam vindo do '
+            f'contrato sintético/CSV selecionado em "Contrato em destaque" na sidebar — ainda não há '
+            f'IV na cadeia real pra recalcular esses dois via Black-Scholes.</div>')
 
 
 # ----------------------------------------------------------------------------
