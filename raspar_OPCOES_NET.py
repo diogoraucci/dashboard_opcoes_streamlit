@@ -1,1303 +1,125 @@
-# ======================================
-# Coletar Tabela Fundamentus
-# ======================================
-def fundamentos():
-    # EMPRESAS TICKERS E RAZÃO SOCIAL
-    from selenium import webdriver
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    from io import StringIO
-    import pandas as pd
-    import numpy as np
-    import time
-    
-    driver = webdriver.Chrome()
-    url = "https://www.fundamentus.com.br/detalhes.php?papel="
-    driver.get(url)
-    
-    # Coletar Tabela
-    html_tabela = driver.find_element(
-        By.TAG_NAME,
-        "table"
-    ).get_attribute("outerHTML")
-    
-    df_empresas = pd.read_html(StringIO(html_tabela))[0]
-    
-    display(df_empresas)
-
-    # ======================================
-    # Coletar Indicadores Funcamentalistas
-    # ======================================
-    url = "https://www.fundamentus.com.br/resultado.php"
-    driver.get(url)
-    time.sleep(5)
-    
-    tabela = driver.find_element(By.TAG_NAME, "table")
-    html = tabela.get_attribute("outerHTML")
-    df_fundamentos = pd.read_html(StringIO(html))[0]
-    
-    driver.quit()
-    # ============================================================
-    # Conversão Fundamentus -> FLOAT
-    # ============================================================
-    def converter_float(valor):
-        if pd.isna(valor):
-            return np.nan
-    
-        valor = str(valor).strip()
-    
-        if valor == "":
-            return np.nan
-    
-        # remove %
-        valor = valor.replace("%", "")
-    
-        # remove separador de milhar brasileiro
-        valor = valor.replace(".", "")
-    
-        # troca decimal brasileiro
-        valor = valor.replace(",", ".")
-    
-        try:
-            return float(valor)
-    
-        except:
-            return np.nan
-            
-    # ============================================================
-    # Converter colunas numéricas
-    # ============================================================
-    for col in df_fundamentos.columns:
-        if col != "Papel":
-            df_fundamentos[col] = df_fundamentos[col].apply(converter_float)
-    
-    # ============================================================
-    # Garantir float no Patrimônio Líquido
-    # ============================================================
-    df_fundamentos["Patrim. Líq"] = df_fundamentos["Patrim. Líq"].astype(float)
-    
-    # ============================================================
-    # Remover notação científica SEM FORMATAR COM VÍRGULA
-    # ============================================================
-    pd.set_option(
-        "display.float_format",
-        lambda x: f"{x:.1f}"
-    )
-
-    # Unir DataFrames
-    # ============================================================
-    # Incluir Nome Comercial e Razão Social no dataframe df
-    # ============================================================
-    df_uniao = df_fundamentos.merge(
-        df_empresas[
-            [
-                "Papel",
-                "Nome Comercial",
-                "Razão Social"
-            ]
-        ],
-        on="Papel",
-        how="left"
-    )
-    
-    # ============================================================
-    # Renomear colunas
-    # ============================================================
-    df_uniao = df_uniao.rename(
-        columns={
-            "Papel": "Ticker",
-            "Nome Comercial": "Nome_Comercial",
-            "Razão Social": "Razão_Social",
-            "Patrim. Líq": "Patrim_Liq"})
-    
-    # ============================================================
-    # Visualizar resultado
-    # ============================================================
-    #display(df_uniao)
-
-    # Remover Empresas com Valores Zerados
-    # Colunas que não podem ser zero
-    colunas_filtro = [
-        "P/L",
-        "P/VP",
-        "PSR",
-        "Div.Yield",
-        "P/Ativo",
-        "P/Cap.Giro",
-        "P/EBIT",
-        "P/Ativ Circ.Liq"
-    ]
-    
-    
-    # Remove linhas onde qualquer coluna da lista é igual a zero
-    df_uniao = df_uniao[
-        ~(df_uniao[colunas_filtro] == 0).any(axis=1)
-    ].copy()
-    
-    # Resetar índice
-    
-    df_uniao.sort_values('Patrim_Liq', ascending=False, inplace=True)
-    df_uniao.reset_index(drop=True, inplace=True)
-    display(df_uniao)
-
-    return df_uniao
-
-# ============================================================
-# COLETAR CARTEIRAS B3
-# IDIV | IBSD | IBOV
-# ============================================================
-
-import time
-from io import StringIO
-
-import pandas as pd
-import undetected_chromedriver as uc
-
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-
-
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
-
-URL_BASE = (
-    "https://sistemaswebb3-listados.b3.com.br/"
-    "indexPage/day/{indice}?language=pt-br"
-)
-
-INDICES = [
-    "IDIV",
-    "IBSD",
-    "IBOV"
-]
-
-XPATH_SELECT_PAGINA = '//*[@id="selectPage"]'
-
-# XPath menos dependente da estrutura completa do HTML
-XPATH_TABELA = (
-    "//app-day-portfolio"
-    "//table"
-)
-
-
-# ============================================================
-# CRIAR DRIVER
-# ============================================================
-
-def criar_driver():
-
-    options = uc.ChromeOptions()
-
-    # Mantém o navegador visível.
-    # Se quiser headless, pode adicionar:
-    # options.add_argument("--headless=new")
-
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-notifications")
-
-    driver = uc.Chrome(
-        options=options,
-        version_main=150
-    )
-
-    return driver
-
-
-# ============================================================
-# COLETAR UM ÍNDICE
-# ============================================================
-
-def coletar_indice_b3(
-    driver,
-    indice,
-    tentativas=5,
-    timeout=30
-):
-
-    url = URL_BASE.format(indice=indice)
-
-    ultimo_erro = None
-
-    for tentativa in range(1, tentativas + 1):
-
-        try:
-
-            print()
-            print("=" * 70)
-            print(f"ÍNDICE: {indice}")
-            print(f"Tentativa: {tentativa}/{tentativas}")
-            print("=" * 70)
-
-            # ------------------------------------------------
-            # ACESSAR PÁGINA
-            # ------------------------------------------------
-
-            print(f"Acessando:")
-            print(url)
-
-            driver.get(url)
-
-            wait = WebDriverWait(driver, timeout)
-
-            # ------------------------------------------------
-            # AGUARDAR SELECT
-            # ------------------------------------------------
-
-            print("Aguardando seletor de quantidade...")
-
-            select_element = wait.until(
-                EC.presence_of_element_located(
-                    (By.XPATH, XPATH_SELECT_PAGINA)
-                )
-            )
-
-            # ------------------------------------------------
-            # SELECIONAR 120 EMPRESAS
-            # ------------------------------------------------
-
-            print("Selecionando 120 empresas...")
-
-            select = Select(select_element)
-
-            # Primeiro tenta localizar pelo texto
-            encontrou_120 = False
-
-            for option in select.options:
-
-                texto = option.text.strip().lower()
-
-                if "120" in texto:
-
-                    select.select_by_visible_text(
-                        option.text
-                    )
-
-                    encontrou_120 = True
-                    break
-
-            # Caso não encontre pelo texto,
-            # tenta a quarta opção como fallback
-            if not encontrou_120:
-
-                if len(select.options) >= 4:
-
-                    select.select_by_index(3)
-
-                    encontrou_120 = True
-
-            if not encontrou_120:
-
-                raise RuntimeError(
-                    "Não foi possível localizar a opção de 120 empresas."
-                )
-
-            # ------------------------------------------------
-            # AGUARDAR TABELA
-            # ------------------------------------------------
-
-            print("Aguardando tabela da B3...")
-
-            tabela = wait.until(
-                EC.presence_of_element_located(
-                    (By.XPATH, XPATH_TABELA)
-                )
-            )
-
-            # ------------------------------------------------
-            # ESPERAR TABELA SER PREENCHIDA
-            # ------------------------------------------------
-
-            def tabela_preenchida(driver):
-
-                try:
-
-                    tabela = driver.find_element(
-                        By.XPATH,
-                        XPATH_TABELA
-                    )
-
-                    linhas = tabela.find_elements(
-                        By.TAG_NAME,
-                        "tr"
-                    )
-
-                    return len(linhas) > 2
-
-                except:
-
-                    return False
-
-            wait.until(tabela_preenchida)
-
-            # Pequena margem para o Angular terminar
-            time.sleep(1)
-
-            # ------------------------------------------------
-            # PEGAR HTML
-            # ------------------------------------------------
-
-            html_tabela = tabela.get_attribute(
-                "outerHTML"
-            )
-
-            if not html_tabela:
-
-                raise RuntimeError(
-                    "A tabela foi encontrada, mas o HTML está vazio."
-                )
-
-            # ------------------------------------------------
-            # CONVERTER PARA DATAFRAME
-            # ------------------------------------------------
-
-            print("Convertendo tabela para DataFrame...")
-
-            tabelas = pd.read_html(
-                StringIO(html_tabela)
-            )
-
-            if len(tabelas) == 0:
-
-                raise RuntimeError(
-                    "pandas.read_html não encontrou nenhuma tabela."
-                )
-
-            df = tabelas[0].copy()
-
-            # ------------------------------------------------
-            # LIMPEZA
-            # ------------------------------------------------
-
-            # Remove linhas completamente vazias
-            df = df.dropna(
-                how="all"
-            ).reset_index(drop=True)
-
-            # Remove colunas completamente vazias
-            df = df.dropna(
-                axis=1,
-                how="all"
-            )
-
-            # ------------------------------------------------
-            # IDENTIFICAR LINHAS QUE NÃO SÃO ATIVOS
-            # ------------------------------------------------
-
-            # O site da B3 normalmente possui linhas finais
-            # relacionadas à tabela que não representam ativos.
-            #
-            # Mantemos aqui uma limpeza conservadora.
-
-            if len(df) >= 2:
-
-                # Se as últimas linhas forem completamente
-                # diferentes da estrutura dos ativos,
-                # removemos apenas as linhas finais.
-                #
-                # Mantém comportamento semelhante ao seu:
-                # df.iloc[:-2]
-
-                df = df.iloc[:-2].copy()
-
-            df = df.reset_index(drop=True)
-
-            # ------------------------------------------------
-            # VALIDAR RESULTADO
-            # ------------------------------------------------
-
-            if df.empty:
-
-                raise RuntimeError(
-                    f"DataFrame {indice} ficou vazio."
-                )
-
-            print()
-            print(f"✓ {indice} coletado com sucesso!")
-            print(f"Linhas : {len(df)}")
-            print(f"Colunas: {len(df.columns)}")
-
-            print()
-            print(df.head())
-
-            return df
-
-        except Exception as erro:
-
-            ultimo_erro = erro
-
-            print()
-            print(
-                f"✗ Erro na tentativa "
-                f"{tentativa}/{tentativas}"
-            )
-
-            print(
-                f"Erro: {type(erro).__name__}: {erro}"
-            )
-
-            # --------------------------------------------
-            # RECARREGAR ENTRE TENTATIVAS
-            # --------------------------------------------
-
-            if tentativa < tentativas:
-
-                print(
-                    "Aguardando antes de tentar novamente..."
-                )
-
-                time.sleep(3)
-
-    # ====================================================
-    # TODAS AS TENTATIVAS FALHARAM
-    # ====================================================
-
-    raise RuntimeError(
-        f"Não foi possível coletar o índice "
-        f"{indice} após {tentativas} tentativas. "
-        f"Último erro: {ultimo_erro}"
-    )
-
-
-# ============================================================
-# FUNÇÃO PRINCIPAL
-# ============================================================
-
-def carteiras_b3(
-    tentativas=5,
-    timeout=30
-):
-
-    driver = None
-
-    resultados = {}
-
-    try:
-
-        # ------------------------------------------------
-        # CRIAR NAVEGADOR UMA ÚNICA VEZ
-        # ------------------------------------------------
-
-        print("=" * 70)
-        print("INICIANDO COLETA DAS CARTEIRAS B3")
-        print("=" * 70)
-
-        driver = criar_driver()
-
-        # ------------------------------------------------
-        # COLETAR ÍNDICES
-        # ------------------------------------------------
-
-        for indice in INDICES:
-
-            df = coletar_indice_b3(
-                driver=driver,
-                indice=indice,
-                tentativas=tentativas,
-                timeout=timeout
-            )
-
-            resultados[indice] = df
-
-        # ------------------------------------------------
-        # RESULTADOS
-        # ------------------------------------------------
-
-        df_IDIV = resultados["IDIV"]
-        df_IBSD = resultados["IBSD"]
-        df_IBOV = resultados["IBOV"]
-
-        print()
-        print("=" * 70)
-        print("COLETA FINALIZADA COM SUCESSO")
-        print("=" * 70)
-
-        print(
-            f"IDIV : {df_IDIV.shape}"
-        )
-
-        print(
-            f"IBSD : {df_IBSD.shape}"
-        )
-
-        print(
-            f"IBOV : {df_IBOV.shape}"
-        )
-
-        return (
-            df_IBOV,
-            df_IBSD,
-            df_IDIV
-        )
-
-    finally:
-
-        # ------------------------------------------------
-        # FECHAR CHROME SEMPRE
-        # ------------------------------------------------
-
-        if driver is not None:
-
-            try:
-
-                driver.quit()
-
-                print()
-                print("Chrome encerrado.")
-
-            except Exception:
-
-                pass
-
-
 # ============================================================
 # COLETAR HISTÓRICO SELIC - BANCO CENTRAL
 # ============================================================
 def selic():
-    from IPython.display import clear_output
-    t = 1 
-    while t == 1:
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-            
-            import pandas as pd
-            from bs4 import BeautifulSoup
-            import time
-            
-            # ============================================================
-            # SELENIUM
-            # ============================================================
-            url = "https://www.bcb.gov.br/controleinflacao/historicotaxasjuros"
-            
-            options = Options()
-            options.add_argument("--headless")
-            options.add_argument("--window-size=1920,1080")
-            
-            driver = webdriver.Chrome(options=options)
-            driver.get(url)
-            time.sleep(5)
-            
-            # captura HTML puro
-            html = driver.find_element(
-                By.ID,
-                "historicotaxasjuros"
-            ).get_attribute("outerHTML")
-            
-            driver.quit()
-            
-            # ============================================================
-            # HTML -> TEXTO DA TABELA
-            # ============================================================
-            soup = BeautifulSoup(html, "html.parser")
-            linhas = []
-            
-            for tr in soup.find("tbody").find_all("tr"):
-                
-                colunas = [
-                    td.get_text(strip=True)
-                    for td in tr.find_all("td")
-                ]
-                
-                linhas.append(colunas)
-            
-            
-            # dataframe manual
-            df_selic = pd.DataFrame(
-                linhas,
-                columns=[
-                    "Reuniao",
-                    "Data",
-                    "Vies",
-                    "Periodo_Vigencia",
-                    "Meta_Selic",
-                    "TBAN",
-                    "Selic_Percentual",
-                    "Selic_aa"
-                ]
-            )
-            
-            
-            # ============================================================
-            # LIMPEZA
-            # ============================================================
-            
-            df_selic["Data"] = pd.to_datetime(
-                df_selic["Data"],
-                format="%d/%m/%Y"
-            )
-            
-            
-            # conversão brasileira correta
-            def converte_numero(valor):
-            
-                if valor in ["", "n/a", None]:
-                    return None
-            
-                return float(
-                    valor.replace(",", ".")
-                )
-            
-            
-            for col in [
-                "Meta_Selic",
-                "TBAN",
-                "Selic_Percentual",
-                "Selic_aa"
-            ]:
-            
-                df_selic[col] = df_selic[col].apply(
-                    converte_numero
-                )
-            
-            # ============================================================
-            # FORMATAR EXIBIÇÃO COM 2 CASAS DECIMAIS
-            # ============================================================
-            
-            colunas_numericas = [
-                "Meta_Selic",
-                "TBAN",
-                "Selic_Percentual",
-                "Selic_aa"
-            ]
-            
-            for col in colunas_numericas:
-                df_selic[col] = df_selic[col].map(
-                    lambda x: f"{x:.2f}" if pd.notna(x) else None
-                )
-            
-            
-            # Exibir Tabela
-            df_selic.head()
-            
-            tx_selic = df_selic['Meta_Selic'][0]
-            print(f'{tx_selic}%')
-            t = 0
-            
-        except:
-            clear_output()
-            
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    
+    import pandas as pd
+    from bs4 import BeautifulSoup
+    import time
+    
+    # ============================================================
+    # SELENIUM
+    # ============================================================
+    url = "https://www.bcb.gov.br/controleinflacao/historicotaxasjuros"
+    
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--window-size=1920,1080")
+    
+    driver = webdriver.Chrome(options=options)
+    driver.get(url)
+    time.sleep(5)
+    
+    # captura HTML puro
+    html = driver.find_element(
+        By.ID,
+        "historicotaxasjuros"
+    ).get_attribute("outerHTML")
+    
+    driver.quit()
+    
+    # ============================================================
+    # HTML -> TEXTO DA TABELA
+    # ============================================================
+    soup = BeautifulSoup(html, "html.parser")
+    linhas = []
+    
+    for tr in soup.find("tbody").find_all("tr"):
+        
+        colunas = [
+            td.get_text(strip=True)
+            for td in tr.find_all("td")
+        ]
+        
+        linhas.append(colunas)
+    
+    
+    # dataframe manual
+    df_selic = pd.DataFrame(
+        linhas,
+        columns=[
+            "Reuniao",
+            "Data",
+            "Vies",
+            "Periodo_Vigencia",
+            "Meta_Selic",
+            "TBAN",
+            "Selic_Percentual",
+            "Selic_aa"
+        ]
+    )
+    
+    
+    # ============================================================
+    # LIMPEZA
+    # ============================================================
+    
+    df_selic["Data"] = pd.to_datetime(
+        df_selic["Data"],
+        format="%d/%m/%Y"
+    )
+    
+    
+    # conversão brasileira correta
+    def converte_numero(valor):
+    
+        if valor in ["", "n/a", None]:
+            return None
+    
+        return float(
+            valor.replace(",", ".")
+        )
+    
+    
+    for col in [
+        "Meta_Selic",
+        "TBAN",
+        "Selic_Percentual",
+        "Selic_aa"
+    ]:
+    
+        df_selic[col] = df_selic[col].apply(
+            converte_numero
+        )
+    
+    # ============================================================
+    # FORMATAR EXIBIÇÃO COM 2 CASAS DECIMAIS
+    # ============================================================
+    
+    colunas_numericas = [
+        "Meta_Selic",
+        "TBAN",
+        "Selic_Percentual",
+        "Selic_aa"
+    ]
+    
+    for col in colunas_numericas:
+        df_selic[col] = df_selic[col].map(
+            lambda x: f"{x:.2f}" if pd.notna(x) else None
+        )
+    
+    
+    df_selic.head()
+    # Exibir Tabela
+    df_selic.head()
+    
+    tx_selic = df_selic['Meta_Selic'][0]
+    #print(f'{tx_selic}%')
 
     return tx_selic, df_selic
-
-
-# ====================================
-# COLETAR COTAÇÕES METATRADER 5
-# ====================================
-def conecta_mt5(conta,login, senha):#====================================================== 
-    import pandas as pd
-    import MetaTrader5 as mt5
-    
-    # logar no mt5
-    #1.1 Coletando cotações----
-    if not mt5.initialize(
-        login=conta,
-        server=login,
-        password=senha,
-        portable=False):
-        print('Falha ao inicializar o MetaTrader 5', mt5.last_error())
-
-def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
-    import MetaTrader5 as mt5
-    import pandas as pd
-    import multiprocessing
-    import os
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-     
-    
-    conecta_mt5(conta, login, senha)
-
-   # Iniciar Contagem de Tempo de Execussão da Célula
-    start_time = time.time()
-    
-    # Imprime o número de CPUs e threads disponíveis
-    print(f"Number of CPU cores: {multiprocessing.cpu_count()}")
-    print(f"Number of threads: {os.cpu_count()}")
-    # Cria uma ThreadPoolExecutor com o número de threads disponíveis
-    executor = ThreadPoolExecutor(max_workers=os.cpu_count())
-    
-    data = pd.DataFrame(mt5.copy_rates_from_pos(codigos[0], tf, 0, cotacoes))['time']
-
-    data = pd.to_datetime(data, unit='s').astype(str)
-    ticksInvalidos = []
-    ticksValidos = []
-
-    # Define a função a ser executada em cada thread
-    def fetch_data(i):
-        try:
-            c = mt5.copy_rates_from_pos(i, tf, 0, cotacoes)[['time', 'close']]
-            #time.sleep(0.02)
-            return i, pd.DataFrame(c['close'])
-        except:
-            return i, None
-
-    # Executa a função fetch_data em cada thread e armazena os resultados em um dicionário
-    results = {}
-    for codigo, df in executor.map(fetch_data, codigos):
-        if df is not None:
-            results[codigo] = df
-        else:
-            ticksInvalidos.append(codigo)
-
-    # Concatena os dataframes de cada código em um único dataframe
-    df = pd.concat(list(results.values()), axis=1)
-    df.columns = [codigo for codigo in results.keys()]
-    df = pd.concat([data,df], axis=1)
-    df.set_index('time', inplace=True)
-    
-    # Definir Número De Cotações Mínimas Por Ativo
-    cotacoes_minimas = cotacoes - int(cotacoes * NaN_Maximo)
-
-    # Verificar auxência de dados faltantes
-    tab_nan = pd.DataFrame()
-    tab_nan['DadosNaN'] = df.isna().sum()
-    tab_nan['DadosVálidos'] = len(df) - tab_nan['DadosNaN']
-    tab_nan['Decisão'] = [#'DadosOK' if x >= cotacoes_minimas else 
-                          'InputarDados' if x >= (cotacoes_minimas * 0.8) and x < cotacoes_minimas else
-                          'ExcluirColuna' if x < cotacoes_minimas * 0.8 else
-                          'DadosOK'
-                          for x in tab_nan['DadosVálidos']]
-    print(tab_nan)
-    
-    
-    # Definir Tickers que Serão Excluidose Tickers que Serão Inputados
-    tickers_input = tab_nan[tab_nan['Decisão'] == 'InputarDados'].index.to_list()
-    tickers_drop = tab_nan[tab_nan['Decisão'] == 'ExcluirColuna'].index.to_list()
-
-    # Excluir Tikcer com Muitos Dados Flatantes
-    df.drop(tickers_drop,axis=1,inplace=True)
-
-    # Inputar Dados Faltantes
-    df.bfill(inplace=True)
-    df.ffill(inplace=True)
-
-    # Encontrando os índices das linhas com valores nulos
-    linhas_com_valores_faltantes = df[df.isnull().any(axis=1)].index.tolist()
-    colunas_com_valores_faltantes = df.columns[df.isnull().any()].tolist()
-    
-    if len(tickers_drop) > 0:
-        print(tickers_drop, '\nTickers Sem Cotaçõe ou Com Cotações insuficientes\n')
-        ticksInvalidos = ticksInvalidos + tickers_drop
-
-    # Adiciona as informações dos ticks válidos e inválidos aos respectivos arrays
-    ticksValidos = df.columns.to_list()
-
-    # Finalizar Contagem de Tempo de Execussão da Célula
-    end_time = time.time()
-    print(f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.\n")
-    #tempoExecussao = (f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.")
-   
-    mt5.shutdown()
-    return df #, ticksInvalidos, ticksValidos
-
-
-# ==========================================
-# Classificar Vol
-# ==========================================
-def loop_classificacao_vol(df_cotacoes):
-
-    import pandas as pd
-    import numpy as np
-    
-    df_class_vol = pd.DataFrame()
-    
-    # ============================================================
-    # TICKERS
-    # ============================================================
-    #tickers = df_cotacoes["ticker"].dropna().unique()
-    tickers = df_cotacoes.columns.to_list()
-    
-    for i in tickers:
-    
-        # ========================================================
-        # SEPARAR O ATIVO
-        # ========================================================
-        df = pd.DataFrame(df_cotacoes[i]).copy()
-    
-        # Ordenar cronologicamente
-        df = df.sort_values("time")
-    
-        df['ticker'] = i
-    
-        '''# Garantir preço numérico
-        df[i] = pd.to_numeric(
-            df[i],
-            errors="coerce"
-        )
-    
-        # Remover preços inválidos
-        df = df.dropna(subset=[i])'''
-    
-    
-        # ============================================================
-        # CONFIGURAÇÕES
-        # ============================================================
-        JANELA_VOL = 21
-        JANELA_IV = 252
-        DIAS_ANO = 252
-    
-        # ============================================================
-        # 1. RETORNO LOGARÍTMICO
-        # ============================================================
-        df["Retorno_Log"] = np.log(
-            df[i] / df[i].shift(1)
-        )
-    
-        # ============================================================
-        # 2. VOLATILIDADE REALIZADA
-        # ============================================================
-        df["Vol_Realizada"] = (
-            df["Retorno_Log"]
-            .rolling(JANELA_VOL)
-            .std()
-            * np.sqrt(DIAS_ANO)
-            * 100
-        ).round(2)
-    
-        df["Vol_20"] = df["Vol_Realizada"].quantile(0.20)
-        df["Vol_80"] = df["Vol_Realizada"].quantile(0.80)
-    
-        # ============================================================
-        # 3. RANK DA VOLATILIDADE
-        # ============================================================
-        vol_min = (
-            df["Vol_Realizada"]
-            .rolling(JANELA_IV)
-            .min()
-        )
-    
-        vol_max = (
-            df["Vol_Realizada"]
-            .rolling(JANELA_IV)
-            .max()
-        )
-    
-        denominador = vol_max - vol_min
-    
-        df["Vol_Rank"] = np.where(
-            denominador != 0,
-            (
-                (df["Vol_Realizada"] - vol_min)
-                / denominador
-            ) * 100,
-            np.nan
-        ).round(2)
-    
-        df["Vol_Rank_20"] = df["Vol_Rank"].quantile(0.20)
-        df["Vol_Rank_80"] = df["Vol_Rank"].quantile(0.80)
-    
-        # ============================================================
-        # 4. PERCENTIL DA VOLATILIDADE
-        # ============================================================
-        df["Vol_Percentil"] = (
-            df["Vol_Realizada"]
-            .rolling(JANELA_IV)
-            .rank(pct=True)
-            * 100
-        ).round(2)
-    
-        df["Vol_Perc_20"] = df["Vol_Percentil"].quantile(0.20)
-        df["Vol_Perc_80"] = df["Vol_Percentil"].quantile(0.80)
-    
-        # ============================================================
-        # CLASSIFICAR VOLATILIDADE
-        # ============================================================
-        df["Vol_Hist_class"] = np.select(
-            [
-                df["Vol_Realizada"] >= df["Vol_80"],
-                df["Vol_Realizada"] <= df["Vol_20"]
-            ],
-            [
-                "Alta",
-                "Baixa"
-            ],
-            default="Neutra"
-        )
-    
-        df["Vol_Perc_class"] = np.select(
-            [
-                df["Vol_Percentil"] >= df["Vol_Perc_80"],
-                df["Vol_Percentil"] <= df["Vol_Perc_20"]
-            ],
-            [
-                "Alta",
-                "Baixa"
-            ],
-            default="Neutra"
-        )
-    
-        df["Vol_Rank_class"] = np.select(
-            [
-                df["Vol_Rank"] >= df["Vol_Rank_80"],
-                df["Vol_Rank"] <= df["Vol_Rank_20"]
-            ],
-            [
-                "Alta",
-                "Baixa"
-            ],
-            default="Neutra"
-        )
-    
-        # ============================================================
-        # RESULTADO — ÚLTIMA OBSERVAÇÃO
-        # ============================================================
-    
-        if df.empty:
-            continue
-    
-        resultado = pd.DataFrame(
-            df[
-                [
-                    'ticker',
-                    "Vol_Rank_class",
-                    "Vol_Rank",
-                    "Vol_Perc_class",
-                    "Vol_Percentil",
-                    "Vol_Hist_class",
-                    "Vol_Realizada"
-                ]
-            ].iloc[-1]
-        ).T
-    
-        df_class_vol = pd.concat([df_class_vol, resultado], axis=0, ignore_index=True)
-    
-    # ============================================================
-    # RENOMEAR ÍNDICE
-    # ============================================================
-    
-    '''if isinstance(
-        df_class_vol.columns,
-        pd.MultiIndex
-    ):
-        df_class_vol.columns = (
-            df_class_vol.columns
-            .get_level_values(-1)
-        )
-    
-    df_class_vol.index = range(
-        len(df_class_vol)
-    )'''
-    
-    return df_class_vol
-
-# ===============================
-# LOOP OPCOES NET
-# ==================================
-"""
-Scraper paralelo de opções (opcoes.net.br) com:
-- ThreadPoolExecutor para rodar vários tickers ao mesmo tempo
-- user-data-dir único por thread + pré-aquecimento do chromedriver
-  (evita conflito entre instâncias do Chrome)
-- Cada thread só coleta dados e devolve o DataFrame em memória; a escrita
-  no Excel acontece UMA ÚNICA VEZ, sequencialmente, depois que todas as
-  threads terminam -> elimina de vez a contenção de I/O (IO_WRITE) e
-  corrupção de arquivo (CRC-32) que escrita concorrente em disco causava
-- Retries com backoff para falhas transitórias de coleta e de escrita
-- Salvaguarda em CSV por ticker caso o Excel final falhe mesmo assim
-"""
-
-import os
-import time
-import shutil
-import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import pandas as pd
-from bs4 import BeautifulSoup
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, WebDriverException
-)
-
-# ============================================================
-# CONFIGURAÇÕES GERAIS
-# ============================================================
-ARQUIVO_EXCEL = "df_cotacoes.xlsx"
-PASTA_TEMP = "_tmp_opcoes"                   # cada ticker grava seu próprio arquivo aqui
-MAX_WORKERS = min(6, os.cpu_count() or 4)   # Chrome é pesado: não use os.cpu_count() puro aqui
-MAX_TENTATIVAS_TICKER = 2                    # retries por ticker em caso de falha
-MAX_TENTATIVAS_EXCEL = 5                     # retries para escrever/mesclar o Excel final
-TIMEOUT_PAGINA = 60
-
-COLUNAS_FINAL = ['Ticker', 'F.M.', 'Tipo', 'Dias úteis', 'Mod.', 'Strike', 'A/I/OTM',
-                  'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
-                  'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma',
-                  'Theta ($)', 'Theta (%)', 'Vega']
-
-COLUNAS_CONVERTER = ['Strike', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
-                      'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma',
-                      'Theta ($)', 'Theta (%)', 'Vega']
-
-# Lock global: serializa a CRIAÇÃO do driver.
-# undetected_chromedriver baixa/copia o chromedriver.exe para uma pasta
-# compartilhada em %appdata%\undetected_chromedriver na primeira execução.
-# Se duas threads chamam uc.Chrome() ao mesmo tempo, elas competem para
-# copiar/renomear esse mesmo arquivo -> WinError 32 / WinError 183.
-# O lock não serializa o scraping inteiro, só o instante de criar o driver.
-driver_creation_lock = threading.Lock()
-
-
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
-def _criar_driver():
-    """Cria uma instância isolada do Chrome (user-data-dir único evita conflito entre threads)."""
-    user_data_dir = tempfile.mkdtemp(prefix="uc_profile_")
-
-    options = uc.ChromeOptions()
-    options.add_argument("--window-position=-2000,0")  # fora da tela; remova para depurar visualmente
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-background-timer-throttling")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument(f"--user-data-dir={user_data_dir}")
-
-    # Serializa só a criação (o patch do chromedriver.exe é o ponto de disputa,
-    # não a navegação/coleta em si, então isso não elimina o paralelismo real).
-    with driver_creation_lock:
-        driver = uc.Chrome(options=options, version_main=150)
-
-    driver.set_page_load_timeout(TIMEOUT_PAGINA)
-    return driver, user_data_dir
-
-
-def _prewarm_chromedriver():
-    """
-    Abre e fecha um Chrome único ANTES de subir as threads, para forçar o
-    undetected_chromedriver a baixar/"patchar" o executável uma única vez,
-    de forma sequencial. Depois disso, as threads só reaproveitam o arquivo
-    já pronto e a race condition de escrita deixa de acontecer.
-    """
-    print("Preparando chromedriver (pré-aquecimento, evita conflito entre threads)...")
-    driver, user_data_dir = _criar_driver()
-    try:
-        driver.quit()
-    finally:
-        shutil.rmtree(user_data_dir, ignore_errors=True)
-    print("Chromedriver pronto.\n")
-
-
-def _marcar_todos_vencimentos(driver):
-    checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox']")
-    for idx, cb in enumerate(checkboxes, start=1):
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", cb)
-            time.sleep(0.1)
-            if not cb.is_selected():
-                driver.execute_script("arguments[0].click();", cb)
-        except WebDriverException:
-            # Se um checkbox falhar não interrompe os demais
-            continue
-    return len(checkboxes)
-
-
-def _abrir_range_strikes(driver):
-    script = """
-    var slider = $("#strike-range");
-    var min = slider.slider("option", "min");
-    var max = slider.slider("option", "max");
-    slider.slider("values", [min, max]);
-    slider.slider("option", "slide").call(slider, null, {values: [min, max]});
-    slider.trigger("slidechange");
-    """
-    driver.execute_script(script)
-
-
-def _coletar_tabela(driver):
-    html = driver.find_element(By.ID, "tblListaOpc").get_attribute("outerHTML")
-    soup = BeautifulSoup(html, "lxml")
-
-    headers = [th.get_text(strip=True) for th in soup.select("thead tr:first-child th")]
-    dados = []
-    for tr in soup.select("tbody tr"):
-        celulas = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if celulas:
-            dados.append(celulas)
-
-    if not dados:
-        raise ValueError("Tabela de opções veio vazia.")
-
-    df_tabela = pd.DataFrame(dados, columns=headers)
-
-    faltantes = [c for c in COLUNAS_FINAL if c not in df_tabela.columns]
-    if faltantes:
-        raise ValueError(f"Colunas esperadas não encontradas: {faltantes}")
-
-    df_tabela[COLUNAS_CONVERTER] = (
-        df_tabela[COLUNAS_CONVERTER]
-        .apply(lambda col: (
-            col.astype(str)
-            .str.replace(r'\.(?=\d{3}(?:,|$))', '', regex=True)
-            .str.replace(',', '.', regex=False)
-            .str.replace('%', '', regex=False)
-            .str.strip()
-            .replace({'': None, '-': None, 'nan': None})
-        ))
-        .apply(pd.to_numeric, errors='coerce')
-    )
-
-    df_tabela = df_tabela[COLUNAS_FINAL]
-    df_tabela = df_tabela[df_tabela.loc[:, 'Último':].notna().all(axis=1)]
-    return df_tabela
-
-
-def _salvar_excel_final(resultados, tentativas=MAX_TENTATIVAS_EXCEL):
-    """
-    Escreve TODOS os tickers de uma vez, sequencialmente, direto no arquivo
-    final. `resultados` é um dict {ticker: df_tabela}.
-
-    Importante: essa função só é chamada DEPOIS que o ThreadPoolExecutor já
-    terminou (nenhuma thread rodando mais). Sendo uma única escrita
-    sequencial, sem nenhuma outra escrita concorrente em disco, o IO_WRITE
-    do lxml/antivírus (que era causado por contenção de I/O entre threads
-    escrevendo ao mesmo tempo) deixa de acontecer estruturalmente — não é
-    mais uma questão de "tentar de novo até dar sorte".
-    """
-    if not resultados:
-        print("Nenhum ticker teve dados para consolidar.")
-        return True
-
-    print(f"\nConsolidando {len(resultados)} tickers em '{ARQUIVO_EXCEL}'...")
-
-    for tentativa in range(1, tentativas + 1):
-        try:
-            with pd.ExcelWriter(ARQUIVO_EXCEL, engine="openpyxl", mode="w") as writer:
-                for ticker, df_tabela in resultados.items():
-                    df_tabela.to_excel(writer, sheet_name=f"opcoes_{ticker}"[:31], index=False)
-            print(f"Arquivo final '{ARQUIVO_EXCEL}' salvo com sucesso "
-                  f"({len(resultados)} abas).")
-            return True
-        except PermissionError:
-            print(f"'{ARQUIVO_EXCEL}' está aberto em outro programa (ex: Excel). "
-                  f"Feche-o. Tentativa {tentativa}/{tentativas}...")
-            time.sleep(3)
-        except Exception as e:
-            print(f"Erro ao consolidar arquivo final (tentativa {tentativa}/{tentativas}): {e}")
-            time.sleep(2 * tentativa)
-
-    # Salvaguarda final: se mesmo assim não conseguiu escrever o arquivo
-    # consolidado, salva cada ticker num CSV individual para não perder o
-    # que já foi raspado (CSV não usa o mesmo engine/lib que deu problema).
-    print(f"Falha ao salvar '{ARQUIVO_EXCEL}' após {tentativas} tentativas. "
-          f"Salvando cada ticker como CSV em '{PASTA_TEMP}/' para não perder os dados.")
-    os.makedirs(PASTA_TEMP, exist_ok=True)
-    for ticker, df_tabela in resultados.items():
-        try:
-            df_tabela.to_csv(os.path.join(PASTA_TEMP, f"{ticker}.csv"), index=False)
-        except Exception as e:
-            print(f"[{ticker}] Falha até no CSV de emergência: {e}")
-    return False
-
-
-# ============================================================
-# PROCESSAMENTO DE UM ÚNICO TICKER (roda em thread)
-# ============================================================
-def processar_ticker(ticker):
-    user_data_dir = None
-    for tentativa in range(1, MAX_TENTATIVAS_TICKER + 1):
-        driver = None
-        try:
-            driver, user_data_dir = _criar_driver()
-            driver.get(f"https://opcoes.net.br/opcoes/bovespa/{ticker}")
-            time.sleep(10)
-
-            n_checkboxes = _marcar_todos_vencimentos(driver)
-            print(f"[{ticker}] {n_checkboxes} checkboxes marcados.")
-
-            _abrir_range_strikes(driver)
-            time.sleep(10)
-
-            df_tabela = _coletar_tabela(driver)
-
-            if df_tabela.empty:
-                print(f"[{ticker}] Tabela final vazia após filtro, pulando.")
-                return ticker, None
-
-            # Nenhuma escrita em disco aqui: o DataFrame fica em memória e é
-            # devolvido pra thread principal, que salva tudo de uma vez, no
-            # final, sequencialmente. Isso elimina a contenção de I/O entre
-            # threads que causava os erros IO_WRITE.
-            print(f"[{ticker}] {len(df_tabela)} linhas coletadas com sucesso.")
-            return ticker, df_tabela
-
-        except (TimeoutException, NoSuchElementException, WebDriverException,
-                ValueError, OSError, PermissionError) as e:
-            # OSError/PermissionError cobre WinError 32/183 do chromedriver.exe,
-            # caso ainda ocorra alguma disputa residual (ex: outro processo
-            # externo mexendo na pasta do undetected_chromedriver).
-            print(f"[{ticker}] Erro na tentativa {tentativa}/{MAX_TENTATIVAS_TICKER}: {e}")
-            if tentativa == MAX_TENTATIVAS_TICKER:
-                return ticker, None
-            time.sleep(3)
-
-        except Exception as e:
-            print(f"[{ticker}] Erro inesperado: {e}")
-            return ticker, None
-
-        finally:
-            if driver is not None:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-            if user_data_dir is not None:
-                shutil.rmtree(user_data_dir, ignore_errors=True)
-
-    return ticker, None
-
-
-# ============================================================
-# EXECUÇÃO PARALELA
-# ============================================================
-def rodar_scraping_paralelo(tickers, max_workers=MAX_WORKERS):
-    resultados = {}   # ticker -> DataFrame, só em memória durante a fase paralela
-    falha = []
-
-    _prewarm_chromedriver()
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(processar_ticker, t): t for t in tickers}
-
-        for future in as_completed(futures):
-            ticker = futures[future]
-            try:
-                _, df_tabela = future.result()
-                if df_tabela is not None:
-                    resultados[ticker] = df_tabela
-                else:
-                    falha.append(ticker)
-            except Exception as e:
-                print(f"[{ticker}] Exceção não tratada na thread: {e}")
-                falha.append(ticker)
-
-    print(f"\nColeta concluída. Sucesso: {len(resultados)} | Falha: {len(falha)}")
-    if falha:
-        print("Tickers com falha na coleta:", falha)
-
-    # Única escrita em disco de todo o processo: sequencial, sem threads
-    # concorrendo -> sem contenção de I/O, sem IO_WRITE.
-    salvo = _salvar_excel_final(resultados)
-
-    return list(resultados.keys()), falha, salvo
-
-
-
-
-
-
-
-
-
-
-
 
 
 # =============================
@@ -1579,7 +401,7 @@ def opcoes_net():
     # reduzir tabela
     df_tabela.loc[:, :'Vega']
     # Remover Colunas
-    #df_tabela = df_tabela.drop(columns=["F.M."])
+    df_tabela = df_tabela.drop(columns=["F.M."])
 
     # Exibir Primeira coleta
     #display(df_tabela)
@@ -1595,7 +417,7 @@ def opcoes_net():
         list(df_tabela.columns[12:20])
     )'''
     
-    colunas_final = ['Ticker', 'F.M.','Tipo', 'Dias úteis','Mod.', 'Strike', 'A/I/OTM', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
+    colunas_final = ['Ticker', 'Tipo', 'Dias úteis','Mod.', 'Strike', 'A/I/OTM', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
                      'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma', 'Theta ($)', 'Theta (%)', 'Vega']
        
     # Colunas que serão convertidas
@@ -1635,17 +457,340 @@ def opcoes_net():
     df_tabela.dtypes
     driver.quit()
 
-
-    # Filtrar Tabel Opções
-    df_tabela = df_tabela[df_tabela.loc[:, 'Último':].notna().all(axis=1)]
     return df_tabela, df_acoes
 
+# =========================================
+# COLETAR CARTEIRAS B3
+# =========================================
 
+
+def carteiras_b3():
+    # =========================================
+    # COLETAR IDIV B3
+    # =========================================
+    import time
+    from bs4 import BeautifulSoup
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import Select
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+    
+    from io import StringIO
+    import pandas as pd
+
+    url = 'https://sistemaswebb3-listados.b3.com.br/indexPage/day/IDIV?language=pt-br'
+    
+    options = uc.ChromeOptions()
+    driver = uc.Chrome(options=options, version_main=150)
+    wait = WebDriverWait(driver, 5)
+    
+    loop = 0
+    while loop == 0:
+        try:
+            
+            # 1. Acessa a página inicial
+            print("1. Acessando a página Carteira IDIV...")
+            driver.get(url)
+            
+            # Verificar Iframes
+            iframes = driver.find_elements(
+                By.TAG_NAME,
+                "iframe"
+            )
+            
+            print("Quantidade de iframes:", len(iframes))
+            
+            for i, iframe in enumerate(iframes):
+                print(i, iframe.get_attribute("src"))
+            
+            # Clicar em Exibir 120 Empresas
+            driver.find_element(
+                By.XPATH,
+                '//*[@id="selectPage"]/option[4]'
+            ).click()
+            
+            time.sleep(5)
+            
+            # Coletar Tabela
+            xpath_tabela = "/html/body/app-root/app-day-portfolio/div/div/div[1]/form/div[2]/div/table"
+            
+            # aguardar tabela
+            tabela = WebDriverWait(driver,20).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, xpath_tabela)
+                )
+            )
+            
+            # HTML da tabela renderizada pelo Angular
+            html_tabela = tabela.get_attribute("outerHTML")
+            
+            # converter para dataframe
+            df = pd.read_html(
+                StringIO(html_tabela))[0]
+            
+            df_IDIV = df.iloc[:-2]
+            display(df_IDIV)
+        
+            # ===================================
+            # COLETAR CARTERA IBSD
+            # ===================================
+            url = 'https://sistemaswebb3-listados.b3.com.br/indexPage/day/IBSD?language=pt-br'
+            
+            '''options = uc.ChromeOptions()
+            driver = uc.Chrome(options=options, version_main=150)
+            wait = WebDriverWait(driver, 5)'''
+            
+            # 1. Acessa a página inicial
+            print("1. Acessando a página Carteira IBSD...")
+            driver.get(url)
+            
+            # Verificar Iframes
+            iframes = driver.find_elements(
+                By.TAG_NAME,
+                "iframe"
+            )
+            
+            print("Quantidade de iframes:", len(iframes))
+            
+            for i, iframe in enumerate(iframes):
+                print(i, iframe.get_attribute("src"))
+            
+            # Clicar em Exibir 120 Empresas
+            driver.find_element(
+                By.XPATH,
+                '//*[@id="selectPage"]/option[4]'
+            ).click()
+            
+            time.sleep(5)
+            
+            # Coletar Tabela
+            xpath_tabela = "/html/body/app-root/app-day-portfolio/div/div/div[1]/form/div[2]/div/table"
+            
+            # aguardar tabela
+            tabela = WebDriverWait(driver,20).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, xpath_tabela)
+                )
+            )
+            
+            # HTML da tabela renderizada pelo Angular
+            html_tabela = tabela.get_attribute("outerHTML")
+            
+            # converter para dataframe
+            df = pd.read_html(
+                StringIO(html_tabela))[0]
+            
+            df_IBSD = df.iloc[:-2]
+            display(df_IBSD) 
+        
+            # ===================================
+            # COLETAR CARTERA IBOV
+            # ===================================
+            url = 'https://sistemaswebb3-listados.b3.com.br/indexPage/day/IBOV?language=pt-br'
+            
+            '''options = uc.ChromeOptions()
+            driver = uc.Chrome(options=options, version_main=150)
+            wait = WebDriverWait(driver, 5)'''
+            
+            # 1. Acessa a página inicial
+            print("1. Acessando a página Carteira IBOV...")
+            driver.get(url)
+            
+            # Verificar Iframes
+            iframes = driver.find_elements(
+                By.TAG_NAME,
+                "iframe"
+            )
+            
+            print("Quantidade de iframes:", len(iframes))
+            
+            for i, iframe in enumerate(iframes):
+                print(i, iframe.get_attribute("src"))
+            
+            time.sleep(5)
+            # Clicar em Exibir 120 Empresas
+            driver.find_element(
+                By.XPATH,
+                '//*[@id="selectPage"]/option[4]'
+            ).click()
+            
+            time.sleep(5)
+            
+            # Coletar Tabela
+            xpath_tabela = "/html/body/app-root/app-day-portfolio/div/div/div[1]/form/div[2]/div/table"
+            
+            # aguardar tabela
+            tabela = WebDriverWait(driver,20).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, xpath_tabela)
+                )
+            )
+            
+            # HTML da tabela renderizada pelo Angular
+            html_tabela = tabela.get_attribute("outerHTML")
+            
+            # converter para dataframe
+            df = pd.read_html(
+                StringIO(html_tabela))[0]
+            
+            df_IBOV = df.iloc[:-2]
+            display(df_IBOV) 
+                   
+    
+            loop = 1
+            driver.quit()
+                    
+        except:
+            clear_output()
+            print('Falha na Coleta.')
+    
+    return df_IBOV, df_IBSD, df_IDIV
 
 # =========================================
 # COLETAR FUNDAMENTUS.COM.BR
 # =========================================
+def fundamentos():
+    # EMPRESAS TICKERS E RAZÃO SOCIAL
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from io import StringIO
+    import pandas as pd
+    import numpy as np
+    import time
+    
+    driver = webdriver.Chrome()
+    url = "https://www.fundamentus.com.br/detalhes.php?papel="
+    driver.get(url)
+    
+    # Coletar Tabela
+    html_tabela = driver.find_element(
+        By.TAG_NAME,
+        "table"
+    ).get_attribute("outerHTML")
+    
+    df_empresas = pd.read_html(StringIO(html_tabela))[0]
+    
+    display(df_empresas)
 
+    # ======================================
+    # Coletar Indicadores Funcamentalistas
+    # ======================================
+    url = "https://www.fundamentus.com.br/resultado.php"
+    driver.get(url)
+    time.sleep(5)
+    
+    tabela = driver.find_element(By.TAG_NAME, "table")
+    html = tabela.get_attribute("outerHTML")
+    df_fundamentos = pd.read_html(StringIO(html))[0]
+    
+    driver.quit()
+    # ============================================================
+    # Conversão Fundamentus -> FLOAT
+    # ============================================================
+    def converter_float(valor):
+        if pd.isna(valor):
+            return np.nan
+    
+        valor = str(valor).strip()
+    
+        if valor == "":
+            return np.nan
+    
+        # remove %
+        valor = valor.replace("%", "")
+    
+        # remove separador de milhar brasileiro
+        valor = valor.replace(".", "")
+    
+        # troca decimal brasileiro
+        valor = valor.replace(",", ".")
+    
+        try:
+            return float(valor)
+    
+        except:
+            return np.nan
+            
+    # ============================================================
+    # Converter colunas numéricas
+    # ============================================================
+    for col in df_fundamentos.columns:
+        if col != "Papel":
+            df_fundamentos[col] = df_fundamentos[col].apply(converter_float)
+    
+    # ============================================================
+    # Garantir float no Patrimônio Líquido
+    # ============================================================
+    df_fundamentos["Patrim. Líq"] = df_fundamentos["Patrim. Líq"].astype(float)
+    
+    # ============================================================
+    # Remover notação científica SEM FORMATAR COM VÍRGULA
+    # ============================================================
+    pd.set_option(
+        "display.float_format",
+        lambda x: f"{x:.1f}"
+    )
+
+    # Unir DataFrames
+    # ============================================================
+    # Incluir Nome Comercial e Razão Social no dataframe df
+    # ============================================================
+    df_uniao = df_fundamentos.merge(
+        df_empresas[
+            [
+                "Papel",
+                "Nome Comercial",
+                "Razão Social"
+            ]
+        ],
+        on="Papel",
+        how="left"
+    )
+    
+    # ============================================================
+    # Renomear colunas
+    # ============================================================
+    df_uniao = df_uniao.rename(
+        columns={
+            "Papel": "Ticker",
+            "Nome Comercial": "Nome_Comercial",
+            "Razão Social": "Razão_Social",
+            "Patrim. Líq": "Patrim_Liq"})
+    
+    # ============================================================
+    # Visualizar resultado
+    # ============================================================
+    #display(df_uniao)
+
+    # Remover Empresas com Valores Zerados
+    # Colunas que não podem ser zero
+    colunas_filtro = [
+        "P/L",
+        "P/VP",
+        "PSR",
+        "Div.Yield",
+        "P/Ativo",
+        "P/Cap.Giro",
+        "P/EBIT",
+        "P/Ativ Circ.Liq"
+    ]
+    
+    
+    # Remove linhas onde qualquer coluna da lista é igual a zero
+    df_uniao = df_uniao[
+        ~(df_uniao[colunas_filtro] == 0).any(axis=1)
+    ].copy()
+    
+    # Resetar índice
+    
+    df_uniao.sort_values('Patrim_Liq', ascending=False, inplace=True)
+    df_uniao.reset_index(drop=True, inplace=True)
+    display(df_uniao)
+
+    return df_uniao
     
 # =============================================
 # OHLC
