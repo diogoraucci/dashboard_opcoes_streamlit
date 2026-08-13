@@ -151,17 +151,31 @@ def carregar_class_vol() -> pd.DataFrame:
     return df.set_index("ticker")
 
 
-CAMINHO_OPCOES = Path(__file__).resolve().parent / "df_opcoes.xlsx"
+def _localizar_caminho_opcoes() -> Path:
+    """Aceita tanto 'df_opcoes.xlsx' quanto 'df_opcoess.xlsx' (nome usado no
+    export original da raspagem) — evita quebrar o app por causa de um 's' a
+    mais/a menos no nome do arquivo. Se nenhum dos dois existir, devolve o
+    nome canônico mesmo assim (o erro de arquivo-não-encontrado aparece só
+    quando o pandas tentar ler, com uma mensagem clara)."""
+    base = Path(__file__).resolve().parent
+    for nome in ("df_opcoes.xlsx", "df_opcoess.xlsx"):
+        candidato = base / nome
+        if candidato.exists():
+            return candidato
+    return base / "df_opcoes.xlsx"
+
+
+CAMINHO_OPCOES = _localizar_caminho_opcoes()
 
 
 @st.cache_data(show_spinner="Carregando cadeia de opções real (df_opcoes.xlsx)...")
 def carregar_df_opcoes(ativo_objeto: str) -> pd.DataFrame:
-    """Lê df_opcoes.xlsx, aba 'opcoes_{ativo_objeto}' — snapshot real da cadeia de
-    opções do ativo-objeto selecionado (raspagem OPCOES.NET). Colunas esperadas
-    nessa aba: 'Ticker' (código da opção, ex: PETR4G0360), 'Strike', 'Último'
-    (preço de mercado), 'Dias úteis' (até o vencimento) e 'Tipo' (CALL/PUT).
-    Se a aba não existir para o ativo pedido, o pandas levanta ValueError —
-    tratado no call site."""
+    """Lê df_opcoes.xlsx (ou df_opcoess.xlsx), aba 'opcoes_{ativo_objeto}' —
+    snapshot real da cadeia de opções do ativo-objeto selecionado (raspagem
+    OPCOES.NET). Colunas esperadas nessa aba: 'Ticker' (código da opção, ex:
+    PETRH834), 'Strike', 'Último' (preço de mercado), 'Dias úteis' (até o
+    vencimento) e 'Tipo' (CALL/PUT). Se a aba não existir para o ativo pedido,
+    o pandas levanta ValueError — tratado no call site."""
     df = pd.read_excel(CAMINHO_OPCOES, sheet_name=f"opcoes_{ativo_objeto}")
     df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")])
     return df
@@ -352,14 +366,12 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
         # pro contrato sintético/CSV (`opcao`) selecionado na sidebar, só pra
         # o painel não quebrar.
         if linha_opcao is not None:
-            codigo_fmt = str(linha_opcao["Ticker"])
             strike_fmt = f"{float(linha_opcao['Strike']):.2f}"
             preco_mkt_fmt = f"{float(linha_opcao['Último']):.2f}"
             du_fmt = f"{int(linha_opcao['Dias úteis'])} DIA(S)"
             vencimento_fmt = _vencimento_por_dias_uteis(linha_opcao["Dias úteis"]).strftime("%d-%m-%Y")
             tipo_fmt = str(linha_opcao["Tipo"]).upper()
         else:
-            codigo_fmt = opcao["codigo"]
             strike_fmt = f"{opcao['strike']:.2f}"
             preco_mkt_fmt = f"{opcao['preco_mercado']:.2f}"
             du_fmt = f"{opcao['dias_uteis']} DIA(S)"
@@ -367,8 +379,6 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
             tipo_fmt = opcao["tipo"]
 
         linha1 = "".join([
-            gd._card_box("TICKER", ativo_objeto),
-            gd._card_box("CÓDIGO", codigo_fmt),
             gd._card_box("TIPO", tipo_fmt),
             gd._card_box("STRIKE", strike_fmt),
             gd._card_box("VENCIMENTO", vencimento_fmt),
