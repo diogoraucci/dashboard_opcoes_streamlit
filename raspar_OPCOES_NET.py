@@ -986,6 +986,320 @@ def loop_classificacao_vol(df_cotacoes):
     
     return df_class_vol
 
+# ===============================
+# LOOP OPCOES NET
+# ==================================
+"""
+Scraper paralelo de opções (opcoes.net.br) com:
+- ThreadPoolExecutor para rodar vários tickers ao mesmo tempo
+- user-data-dir único por thread + pré-aquecimento do chromedriver
+  (evita conflito entre instâncias do Chrome)
+- Cada thread só coleta dados e devolve o DataFrame em memória; a escrita
+  no Excel acontece UMA ÚNICA VEZ, sequencialmente, depois que todas as
+  threads terminam -> elimina de vez a contenção de I/O (IO_WRITE) e
+  corrupção de arquivo (CRC-32) que escrita concorrente em disco causava
+- Retries com backoff para falhas transitórias de coleta e de escrita
+- Salvaguarda em CSV por ticker caso o Excel final falhe mesmo assim
+"""
+
+import os
+import time
+import shutil
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pandas as pd
+from bs4 import BeautifulSoup
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, WebDriverException
+)
+
+# ============================================================
+# CONFIGURAÇÕES GERAIS
+# ============================================================
+ARQUIVO_EXCEL = "df_cotacoes.xlsx"
+PASTA_TEMP = "_tmp_opcoes"                   # cada ticker grava seu próprio arquivo aqui
+MAX_WORKERS = min(6, os.cpu_count() or 4)   # Chrome é pesado: não use os.cpu_count() puro aqui
+MAX_TENTATIVAS_TICKER = 2                    # retries por ticker em caso de falha
+MAX_TENTATIVAS_EXCEL = 5                     # retries para escrever/mesclar o Excel final
+TIMEOUT_PAGINA = 60
+
+COLUNAS_FINAL = ['Ticker', 'F.M.', 'Tipo', 'Dias úteis', 'Mod.', 'Strike', 'A/I/OTM',
+                  'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
+                  'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma',
+                  'Theta ($)', 'Theta (%)', 'Vega']
+
+COLUNAS_CONVERTER = ['Strike', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
+                      'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma',
+                      'Theta ($)', 'Theta (%)', 'Vega']
+
+# Lock global: serializa a CRIAÇÃO do driver.
+# undetected_chromedriver baixa/copia o chromedriver.exe para uma pasta
+# compartilhada em %appdata%\undetected_chromedriver na primeira execução.
+# Se duas threads chamam uc.Chrome() ao mesmo tempo, elas competem para
+# copiar/renomear esse mesmo arquivo -> WinError 32 / WinError 183.
+# O lock não serializa o scraping inteiro, só o instante de criar o driver.
+driver_creation_lock = threading.Lock()
+
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+def _criar_driver():
+    """Cria uma instância isolada do Chrome (user-data-dir único evita conflito entre threads)."""
+    user_data_dir = tempfile.mkdtemp(prefix="uc_profile_")
+
+    options = uc.ChromeOptions()
+    options.add_argument("--window-position=-2000,0")  # fora da tela; remova para depurar visualmente
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument(f"--user-data-dir={user_data_dir}")
+
+    # Serializa só a criação (o patch do chromedriver.exe é o ponto de disputa,
+    # não a navegação/coleta em si, então isso não elimina o paralelismo real).
+    with driver_creation_lock:
+        driver = uc.Chrome(options=options, version_main=150)
+
+    driver.set_page_load_timeout(TIMEOUT_PAGINA)
+    return driver, user_data_dir
+
+
+def _prewarm_chromedriver():
+    """
+    Abre e fecha um Chrome único ANTES de subir as threads, para forçar o
+    undetected_chromedriver a baixar/"patchar" o executável uma única vez,
+    de forma sequencial. Depois disso, as threads só reaproveitam o arquivo
+    já pronto e a race condition de escrita deixa de acontecer.
+    """
+    print("Preparando chromedriver (pré-aquecimento, evita conflito entre threads)...")
+    driver, user_data_dir = _criar_driver()
+    try:
+        driver.quit()
+    finally:
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+    print("Chromedriver pronto.\n")
+
+
+def _marcar_todos_vencimentos(driver):
+    checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox']")
+    for idx, cb in enumerate(checkboxes, start=1):
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", cb)
+            time.sleep(0.1)
+            if not cb.is_selected():
+                driver.execute_script("arguments[0].click();", cb)
+        except WebDriverException:
+            # Se um checkbox falhar não interrompe os demais
+            continue
+    return len(checkboxes)
+
+
+def _abrir_range_strikes(driver):
+    script = """
+    var slider = $("#strike-range");
+    var min = slider.slider("option", "min");
+    var max = slider.slider("option", "max");
+    slider.slider("values", [min, max]);
+    slider.slider("option", "slide").call(slider, null, {values: [min, max]});
+    slider.trigger("slidechange");
+    """
+    driver.execute_script(script)
+
+
+def _coletar_tabela(driver):
+    html = driver.find_element(By.ID, "tblListaOpc").get_attribute("outerHTML")
+    soup = BeautifulSoup(html, "lxml")
+
+    headers = [th.get_text(strip=True) for th in soup.select("thead tr:first-child th")]
+    dados = []
+    for tr in soup.select("tbody tr"):
+        celulas = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if celulas:
+            dados.append(celulas)
+
+    if not dados:
+        raise ValueError("Tabela de opções veio vazia.")
+
+    df_tabela = pd.DataFrame(dados, columns=headers)
+
+    faltantes = [c for c in COLUNAS_FINAL if c not in df_tabela.columns]
+    if faltantes:
+        raise ValueError(f"Colunas esperadas não encontradas: {faltantes}")
+
+    df_tabela[COLUNAS_CONVERTER] = (
+        df_tabela[COLUNAS_CONVERTER]
+        .apply(lambda col: (
+            col.astype(str)
+            .str.replace(r'\.(?=\d{3}(?:,|$))', '', regex=True)
+            .str.replace(',', '.', regex=False)
+            .str.replace('%', '', regex=False)
+            .str.strip()
+            .replace({'': None, '-': None, 'nan': None})
+        ))
+        .apply(pd.to_numeric, errors='coerce')
+    )
+
+    df_tabela = df_tabela[COLUNAS_FINAL]
+    df_tabela = df_tabela[df_tabela.loc[:, 'Último':].notna().all(axis=1)]
+    return df_tabela
+
+
+def _salvar_excel_final(resultados, tentativas=MAX_TENTATIVAS_EXCEL):
+    """
+    Escreve TODOS os tickers de uma vez, sequencialmente, direto no arquivo
+    final. `resultados` é um dict {ticker: df_tabela}.
+
+    Importante: essa função só é chamada DEPOIS que o ThreadPoolExecutor já
+    terminou (nenhuma thread rodando mais). Sendo uma única escrita
+    sequencial, sem nenhuma outra escrita concorrente em disco, o IO_WRITE
+    do lxml/antivírus (que era causado por contenção de I/O entre threads
+    escrevendo ao mesmo tempo) deixa de acontecer estruturalmente — não é
+    mais uma questão de "tentar de novo até dar sorte".
+    """
+    if not resultados:
+        print("Nenhum ticker teve dados para consolidar.")
+        return True
+
+    print(f"\nConsolidando {len(resultados)} tickers em '{ARQUIVO_EXCEL}'...")
+
+    for tentativa in range(1, tentativas + 1):
+        try:
+            with pd.ExcelWriter(ARQUIVO_EXCEL, engine="openpyxl", mode="w") as writer:
+                for ticker, df_tabela in resultados.items():
+                    df_tabela.to_excel(writer, sheet_name=f"opcoes_{ticker}"[:31], index=False)
+            print(f"Arquivo final '{ARQUIVO_EXCEL}' salvo com sucesso "
+                  f"({len(resultados)} abas).")
+            return True
+        except PermissionError:
+            print(f"'{ARQUIVO_EXCEL}' está aberto em outro programa (ex: Excel). "
+                  f"Feche-o. Tentativa {tentativa}/{tentativas}...")
+            time.sleep(3)
+        except Exception as e:
+            print(f"Erro ao consolidar arquivo final (tentativa {tentativa}/{tentativas}): {e}")
+            time.sleep(2 * tentativa)
+
+    # Salvaguarda final: se mesmo assim não conseguiu escrever o arquivo
+    # consolidado, salva cada ticker num CSV individual para não perder o
+    # que já foi raspado (CSV não usa o mesmo engine/lib que deu problema).
+    print(f"Falha ao salvar '{ARQUIVO_EXCEL}' após {tentativas} tentativas. "
+          f"Salvando cada ticker como CSV em '{PASTA_TEMP}/' para não perder os dados.")
+    os.makedirs(PASTA_TEMP, exist_ok=True)
+    for ticker, df_tabela in resultados.items():
+        try:
+            df_tabela.to_csv(os.path.join(PASTA_TEMP, f"{ticker}.csv"), index=False)
+        except Exception as e:
+            print(f"[{ticker}] Falha até no CSV de emergência: {e}")
+    return False
+
+
+# ============================================================
+# PROCESSAMENTO DE UM ÚNICO TICKER (roda em thread)
+# ============================================================
+def processar_ticker(ticker):
+    user_data_dir = None
+    for tentativa in range(1, MAX_TENTATIVAS_TICKER + 1):
+        driver = None
+        try:
+            driver, user_data_dir = _criar_driver()
+            driver.get(f"https://opcoes.net.br/opcoes/bovespa/{ticker}")
+            time.sleep(10)
+
+            n_checkboxes = _marcar_todos_vencimentos(driver)
+            print(f"[{ticker}] {n_checkboxes} checkboxes marcados.")
+
+            _abrir_range_strikes(driver)
+            time.sleep(10)
+
+            df_tabela = _coletar_tabela(driver)
+
+            if df_tabela.empty:
+                print(f"[{ticker}] Tabela final vazia após filtro, pulando.")
+                return ticker, None
+
+            # Nenhuma escrita em disco aqui: o DataFrame fica em memória e é
+            # devolvido pra thread principal, que salva tudo de uma vez, no
+            # final, sequencialmente. Isso elimina a contenção de I/O entre
+            # threads que causava os erros IO_WRITE.
+            print(f"[{ticker}] {len(df_tabela)} linhas coletadas com sucesso.")
+            return ticker, df_tabela
+
+        except (TimeoutException, NoSuchElementException, WebDriverException,
+                ValueError, OSError, PermissionError) as e:
+            # OSError/PermissionError cobre WinError 32/183 do chromedriver.exe,
+            # caso ainda ocorra alguma disputa residual (ex: outro processo
+            # externo mexendo na pasta do undetected_chromedriver).
+            print(f"[{ticker}] Erro na tentativa {tentativa}/{MAX_TENTATIVAS_TICKER}: {e}")
+            if tentativa == MAX_TENTATIVAS_TICKER:
+                return ticker, None
+            time.sleep(3)
+
+        except Exception as e:
+            print(f"[{ticker}] Erro inesperado: {e}")
+            return ticker, None
+
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            if user_data_dir is not None:
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+
+    return ticker, None
+
+
+# ============================================================
+# EXECUÇÃO PARALELA
+# ============================================================
+def rodar_scraping_paralelo(tickers, max_workers=MAX_WORKERS):
+    resultados = {}   # ticker -> DataFrame, só em memória durante a fase paralela
+    falha = []
+
+    _prewarm_chromedriver()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(processar_ticker, t): t for t in tickers}
+
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                _, df_tabela = future.result()
+                if df_tabela is not None:
+                    resultados[ticker] = df_tabela
+                else:
+                    falha.append(ticker)
+            except Exception as e:
+                print(f"[{ticker}] Exceção não tratada na thread: {e}")
+                falha.append(ticker)
+
+    print(f"\nColeta concluída. Sucesso: {len(resultados)} | Falha: {len(falha)}")
+    if falha:
+        print("Tickers com falha na coleta:", falha)
+
+    # Única escrita em disco de todo o processo: sequencial, sem threads
+    # concorrendo -> sem contenção de I/O, sem IO_WRITE.
+    salvo = _salvar_excel_final(resultados)
+
+    return list(resultados.keys()), falha, salvo
+
+
+
+
+
+
+
+
+
+
+
+
+
 # =============================
 # Coletar Opcoes Net
 # =============================
@@ -1265,7 +1579,7 @@ def opcoes_net():
     # reduzir tabela
     df_tabela.loc[:, :'Vega']
     # Remover Colunas
-    df_tabela = df_tabela.drop(columns=["F.M."])
+    #df_tabela = df_tabela.drop(columns=["F.M."])
 
     # Exibir Primeira coleta
     #display(df_tabela)
@@ -1281,7 +1595,7 @@ def opcoes_net():
         list(df_tabela.columns[12:20])
     )'''
     
-    colunas_final = ['Ticker', 'Tipo', 'Dias úteis','Mod.', 'Strike', 'A/I/OTM', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
+    colunas_final = ['Ticker', 'F.M.','Tipo', 'Dias úteis','Mod.', 'Strike', 'A/I/OTM', 'Dist. (%) do Strike', 'Último', 'Var.\xa0(%)', 'Núm. de Neg.',
                      'Vol. Financeiro', 'Vol. Impl. (%)', 'Delta', 'Gamma', 'Theta ($)', 'Theta (%)', 'Vega']
        
     # Colunas que serão convertidas
@@ -1321,6 +1635,9 @@ def opcoes_net():
     df_tabela.dtypes
     driver.quit()
 
+
+    # Filtrar Tabel Opções
+    df_tabela = df_tabela[df_tabela.loc[:, 'Último':].notna().all(axis=1)]
     return df_tabela, df_acoes
 
 
