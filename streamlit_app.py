@@ -35,7 +35,7 @@ import gerar_dados_exemplo as gde
 
 CORES = gd.CORES
 
-st.set_page_config(page_title="Dashboard de Opções", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Dashboard de Opções", page_icon="📊", layout="wide", initial_sidebar_state="collapsed")
 
 
 def _fmt_data_br(d) -> str:
@@ -89,6 +89,37 @@ def _injetar_tema():
 
 
 # ----------------------------------------------------------------------------
+
+def _injetar_layout_referencia():
+    st.html(f"""
+    <style>
+      .block-container {{ max-width:1500px; padding:14px 8px 24px; }}
+      [data-testid="column"] {{ min-width:0 !important; }}
+      [data-testid="stVerticalBlockBorderWrapper"] {{ background:{CORES['painel']}; border-color:{CORES['borda']}; border-radius:7px; }}
+      .ref-contract-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin:8px 0 12px; }}
+      .ref-span-3 {{ grid-column:1 / -1; }}
+      .ref-metric {{ border:1px solid {CORES['borda']}; border-radius:7px; padding:8px 9px; min-height:46px; background:{CORES['fundo']}; }}
+      .ref-metric-label {{ font-family:'JetBrains Mono',monospace; font-size:8px; color:{CORES['fraco']}; text-transform:uppercase; margin-bottom:4px; }}
+      .ref-metric-value {{ font-family:'JetBrains Mono',monospace; font-size:13px; color:{CORES['texto']}; font-weight:700; }}
+      .ref-section {{ font-family:'JetBrains Mono',monospace; font-size:9px; color:{CORES['fraco']}; text-transform:uppercase; letter-spacing:.05em; margin:12px 0 6px; }}
+      .ref-section-gex {{ color:{CORES['texto']}; font-size:11px; margin-top:12px; }}
+      .ref-gex-cards {{ margin-bottom:7px !important; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .card {{ padding:7px 5px; min-height:53px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .card-label {{ font-size:8px; margin-bottom:4px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .card-value {{ font-size:13px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .tabela {{ font-size:10px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .tabela th {{ font-size:8px; padding:5px 5px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .tabela td {{ padding:5px 5px; }}
+      [data-testid="stVerticalBlockBorderWrapper"] .js-plotly-plot {{ margin-bottom:0 !important; }}
+      .stSelectbox label, .stSlider label {{ font-family:'JetBrains Mono',monospace !important; font-size:9px !important; text-transform:uppercase; }}
+      .stSelectbox, .stSlider {{ margin-bottom:-4px; }}
+      @media (max-width:1000px) {{
+        .ref-contract-grid {{ grid-template-columns:repeat(2,1fr); }}
+        .ref-span-3 {{ grid-column:1 / -1; }}
+      }}
+    </style>
+    """)
+
 # WRAPPERS CACHEADOS — envolvem motor_calculo.py (inalterado) com
 # @st.cache_data, pra não reprocessar CSV/GEX/BS a cada interação na sidebar.
 # ----------------------------------------------------------------------------
@@ -418,6 +449,113 @@ def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFram
 
 
 # ----------------------------------------------------------------------------
+def _card_metric(label, value):
+    return (f'<div class="ref-metric"><div class="ref-metric-label">{label}</div>'
+            f'<div class="ref-metric-value">{value}</div></div>')
+
+
+def _layout_referencia(gex, opcao, df_cotacoes, class_vol, ticker_atual):
+    ativos = df_cotacoes.columns.tolist()
+    idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
+    data_ref = st.session_state["dados"]["precos"]["data"].iloc[-1]
+
+    col_esq, col_dir = st.columns([0.425, 0.575], gap="small")
+
+    with col_esq:
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([1.0, 1.15, .78], gap="small")
+            with c1:
+                ativo_objeto = st.selectbox("Ativo-objeto", ativos, index=idx_default, key="ref_ativo")
+            try:
+                df_opcoes_ativo = carregar_df_opcoes(ativo_objeto)
+            except (FileNotFoundError, ValueError):
+                df_opcoes_ativo = None
+            with c2:
+                if df_opcoes_ativo is not None and "Ticker" in df_opcoes_ativo.columns and len(df_opcoes_ativo):
+                    codigos = sorted(df_opcoes_ativo["Ticker"].astype(str).unique())
+                    codigo_sel = st.selectbox("CÓDIGO", codigos, key=f"ref_codigo_{ativo_objeto}")
+                    linha_opcao = df_opcoes_ativo.loc[df_opcoes_ativo["Ticker"].astype(str) == codigo_sel].iloc[0]
+                else:
+                    linha_opcao = None
+                    st.selectbox("CÓDIGO", ["— sem opções —"], disabled=True, key=f"ref_codigo_empty_{ativo_objeto}")
+            with c3:
+                period = st.slider("Period", 20, 300, 50, 5, key="ref_period")
+
+            precos_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
+            preco_atual = float(precos_ativo["fechamento"].iloc[-1])
+            bandas = bandas_desvio_padrao_cached(precos_ativo, period)
+
+            if linha_opcao is not None:
+                tipo = str(linha_opcao["Tipo"]).upper()
+                strike = f"{float(linha_opcao['Strike']):.2f}"
+                preco_mkt = f"{float(linha_opcao['Último']):.2f}"
+                du = f"{int(linha_opcao['Dias úteis'])} DIA(S)"
+                venc = _vencimento_por_dias_uteis(linha_opcao["Dias úteis"]).strftime("%d-%m-%Y")
+            else:
+                tipo = str(opcao["tipo"]).upper()
+                strike = f"{opcao['strike']:.2f}"
+                preco_mkt = f"{opcao['preco_mercado']:.2f}"
+                du = f"{opcao['dias_uteis']} DIA(S)"
+                venc = pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")
+
+            if ativo_objeto in class_vol.index:
+                lv = class_vol.loc[ativo_objeto]
+                vol_hist = _badge(f"{lv['Vol_Realizada']:.2f}%", lv["Vol_Hist_class"])
+                iv_pctl = _badge(f"{lv['Vol_Percentil']:.2f}%", lv["Vol_Perc_class"])
+                iv_rank = _badge(f"{lv['Vol_Rank']:.2f}%", lv["Vol_Rank_class"])
+            else:
+                vol_hist = iv_pctl = iv_rank = "—"
+
+            metrics = f'''<div class="ref-contract-grid">
+              {_card_metric("TIPO", tipo)}
+              {_card_metric("STRIKE", strike)}
+              {_card_metric("VENCIMENTO", venc)}
+              <div class="ref-span-3">{_card_metric("D.U.", du)}</div>
+              {_card_metric("PREÇO", f"{preco_atual:.2f}")}
+              {_card_metric("PREÇO MKT", preco_mkt)}
+              {_card_metric("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}")}
+              {_card_metric("IV PERCENTIL", iv_pctl)}
+              {_card_metric("IV RANK", iv_rank)}
+              {_card_metric("VOL HISTÓRICA", vol_hist)}
+              {_card_metric("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%")}
+            </div>'''
+            st.html(metrics)
+
+            st.html(f'<div class="ref-section ref-section-gex">GEX {ticker_atual}: snapshot {pd.Timestamp(data_ref):%d %b %Y} • expiry {pd.Timestamp(gex["vencimento_alvo"]):%d %b %Y}</div>')
+            linha1 = "".join([
+                gd._card("WALLS (C/P)", f"{gex['call_wall']:.2f} / {gex['put_wall']:.2f}"),
+                gd._card("GAMMA FLIP", f"{gex['gamma_flip']:.2f}", CORES["neutro"]),
+                gd._card("PCR (GLOBAL)", f"{gex['pcr']:.2f}"),
+                gd._card("SPOT", f"{gex['spot']:.2f}")
+            ])
+            st.html(f'<div class="cards-row ref-gex-cards">{linha1}</div>')
+            st.html('<div class="ref-section">Pin Candidates (±5% from spot)</div>')
+            st.html(gd._tabela_pin_candidates(gex["pin_candidates"]))
+
+            cor_sent = (CORES["baixa"] if gex["sentiment"] == "Bearish"
+                        else CORES["alta"] if gex["sentiment"] == "Bullish" else CORES["fraco"])
+            linha2 = "".join([
+                gd._card("PCR (OI)", f"{gex['pcr']:.2f}"),
+                gd._card("SENTIMENT", gex["sentiment"], cor_sent),
+                gd._card("IV SKEW", f"{gex['iv_skew']:.2f}%"),
+                gd._card("REGIME", gex["regime"], CORES["neutro"]),
+                gd._card("FLIP DIST.", f"{gex['flip_dist']:.2f}%"),
+                gd._card("HEDGING", gex["hedging"])
+            ])
+            st.html(f'<div class="cards-row cards-row-3 ref-gex-cards">{linha2}</div>')
+            st.html('<div class="ref-section">Significant GEX Zones</div>')
+            st.html(gd._tabela_zonas(gex["zonas_significativas"]))
+
+    with col_dir:
+            with st.container(border=True):
+                fig = gd._fig_direita(precos_ativo, ativo_objeto, bandas=bandas)
+                fig.update_layout(height=780, margin=dict(l=45, r=15, t=38, b=25))
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="fig_direita_referencia")
+                fig_gex = gd._fig_gex_profile(gex, ticker_atual)
+                fig_gex.update_layout(height=450, margin=dict(l=48, r=15, t=42, b=35))
+                st.plotly_chart(fig_gex, use_container_width=True, config={"displayModeBar": False}, key="fig_gex_referencia")
+
+
 # SIDEBAR — substitui o argparse original (ticker, --dir, --codigo, --vencimento)
 # ----------------------------------------------------------------------------
 
@@ -485,6 +623,7 @@ def _sidebar_configuracao():
 
 def main():
     _injetar_tema()
+    _injetar_layout_referencia()
     _sidebar_configuracao()
 
     dados = st.session_state.get("dados")
@@ -514,32 +653,26 @@ def main():
 
     try:
         gex = gex_cached(cadeia, spot, data_ref, pd.Timestamp(vencimento_alvo), r, q)
-        opcao = metricas_opcao_cached(cadeia, precos_ind, spot, data_ref, r, q,
-                                       ticker, codigo_escolhido, diretorio)
+        opcao = metricas_opcao_cached(
+            cadeia, precos_ind, spot, data_ref, r, q, ticker,
+            codigo_escolhido, diretorio
+        )
     except ValueError as e:
         st.error(str(e))
         return
 
-    st.caption(
-        f"**{ticker}** · Spot {spot:.2f} · dado de referência "
-        f"{pd.Timestamp(data_ref):%d/%m/%Y} · fonte: {dados['fonte']}")
-
-    col_esq, col_dir = st.columns(2, gap="large")
-    with col_esq:
-        _painel_gex(gex, ticker, data_ref)
-    with col_dir:
-        try:
-            df_cotacoes = carregar_df_cotacoes()
-            class_vol = carregar_class_vol()
-            _painel_opcao(opcao, df_cotacoes, class_vol, ticker)
-        except FileNotFoundError:
-            st.error(
-                f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. Ele precisa estar "
-                "na raiz do repositório, junto com o streamlit_app.py.")
-        except ValueError as e:
-            st.error(
-                f"Erro lendo `df_cotacoes.xlsx` — confira se as abas 'cotacoes' e 'class_vol' "
-                f"existem com esses nomes exatos. Detalhe: {e}")
+    try:
+        df_cotacoes = carregar_df_cotacoes()
+        class_vol = carregar_class_vol()
+        _layout_referencia(gex, opcao, df_cotacoes, class_vol, ticker)
+    except FileNotFoundError:
+        st.error(
+            f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. "
+            "Ele precisa estar na raiz do repositório, junto com o streamlit_app.py.")
+    except ValueError as e:
+        st.error(
+            f"Erro lendo `df_cotacoes.xlsx` — confira se as abas 'cotacoes' e "
+            f"'class_vol' existem com esses nomes exatos. Detalhe: {e}")
 
     st.sidebar.divider()
     if st.sidebar.button("⬇️ Gerar HTML estático (export)", width='stretch'):
@@ -548,6 +681,8 @@ def main():
         st.sidebar.download_button(
             f"Baixar dashboard_{ticker}.html", data=tmp_out.read_bytes(),
             file_name=f"dashboard_{ticker}.html", mime="text/html", width='stretch')
+
+
 
 
 if __name__ == "__main__":
