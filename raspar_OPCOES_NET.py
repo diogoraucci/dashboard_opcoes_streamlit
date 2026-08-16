@@ -1020,7 +1020,7 @@ from selenium.common.exceptions import (
 # ============================================================
 # CONFIGURAÇÕES GERAIS
 # ============================================================
-ARQUIVO_EXCEL = "df_opcoess.xlsx"
+ARQUIVO_EXCEL = "df_opcoes.xlsx"
 PASTA_TEMP = "_tmp_opcoes"                   # cada ticker grava seu próprio arquivo aqui
 MAX_WORKERS = min(6, os.cpu_count() or 4)   # Chrome é pesado: não use os.cpu_count() puro aqui
 MAX_TENTATIVAS_TICKER = 2                    # retries por ticker em caso de falha
