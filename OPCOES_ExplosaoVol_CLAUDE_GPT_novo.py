@@ -154,7 +154,7 @@ rsi = 14 # 14'''
 # ============================================================
 
 # --- VOL_21 (volatilidade realizada) -------------------------
-VOL21_PERCENTIL = 0.20   # percentil máximo de VOL_21 para squeeze (mínima)
+'''VOL21_PERCENTIL = 0.20   # percentil máximo de VOL_21 para squeeze (mínima)
 VOL21_JANELA    = 252    # janela (em candles) do rolling do percentil
 
 # --- BOLLINGER WIDTH ------------------------------------------
@@ -166,7 +166,7 @@ ADX_MAXIMO = 25   # ADX máximo para squeeze (trend fraco / mínima)
 
 # --- EXPANSÃO (sinal de "explosão") -----------------------------
 # explosao = squeeze anterior & range > ATR * ATR_EXPANSAO_MULT
-ATR_EXPANSAO_MULT = 1.5
+ATR_EXPANSAO_MULT = 1.5'''
 
 
 def true_range(df):
@@ -342,6 +342,7 @@ def percentil(series,window=252):
 # ============================================================
 # CÁLCULO DO SQUEEZE
 # ============================================================
+'''
 def detectar_squeeze(
     df,
     vol21_percentil=VOL21_PERCENTIL,
@@ -350,6 +351,18 @@ def detectar_squeeze(
     bb_width_janela=BB_WIDTH_JANELA,
     adx_maximo=ADX_MAXIMO,
     atr_expansao_mult=ATR_EXPANSAO_MULT):
+    out=df.copy()
+
+    (
+'''
+def detectar_squeeze(
+    df,
+    VOL21_PERCENTIL,
+    VOL21_JANELA,
+    BB_WIDTH_PERCENTIL,
+    BB_WIDTH_JANELA,
+    ADX_MAXIMO,
+    ATR_EXPANSAO_MULT):
     out=df.copy()
 
     (
@@ -388,8 +401,8 @@ def detectar_squeeze(
     
     out["BB_WIDTH_P20"] = (
         out["bb_width"]
-        .rolling(bb_width_janela)
-        .quantile(bb_width_percentil)
+        .rolling(BB_WIDTH_JANELA)
+        .quantile(BB_WIDTH_PERCENTIL)
     )
 
     
@@ -420,8 +433,8 @@ def detectar_squeeze(
     
     out["VOL21_P20"] = (
         out["VOL_21"]
-        .rolling(vol21_janela)
-        .quantile(vol21_percentil)
+        .rolling(VOL21_JANELA)
+        .quantile(VOL21_PERCENTIL)
     )
     
     out["VOL_MEDIA"] = (
@@ -446,7 +459,7 @@ def detectar_squeeze(
         &
         (out["bb_width"] <= out["BB_WIDTH_P20"])
         &
-        (out["ADX"] <= adx_maximo)
+        (out["ADX"] <= ADX_MAXIMO)
     
     )
 
@@ -465,7 +478,7 @@ def detectar_squeeze(
     out["explosao"] = (
         out["squeeze"].shift(1)
         &
-        (out["range"] > atr_expansao_mult * out["ATR"])
+        (out["range"] > ATR_EXPANSAO_MULT * out["ATR"])
         #&
         #(out["Volume"] > 1.5 * out["vol_media_volume"])
     )
