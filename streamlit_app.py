@@ -362,7 +362,7 @@ def _metricas_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFr
         if df_opcoes_ativo is not None and "Ticker" in df_opcoes_ativo.columns and len(df_opcoes_ativo):
             codigos_opcao = sorted(df_opcoes_ativo["Ticker"].astype(str).unique())
             codigo_opcao_sel = st.selectbox(
-                "CÓDIGO OPÇÃO", codigos_opcao, key=f"codigo_opcao_{ativo_objeto}",
+                "CÓDIGO", codigos_opcao, key=f"codigo_opcao_{ativo_objeto}",
                 help=f"Contratos da aba 'opcoes_{ativo_objeto}' em df_opcoes.xlsx.")
             linha_opcao = df_opcoes_ativo.loc[
                 df_opcoes_ativo["Ticker"].astype(str) == codigo_opcao_sel].iloc[0]
@@ -370,7 +370,7 @@ def _metricas_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFr
             st.selectbox("CÓDIGO", ["— sem aba opcoes_" + ativo_objeto + " —"], disabled=True)
 
     with col_period:
-        period = st.slider("Period (Média Móvel)", min_value=20, max_value=300,
+        period = st.slider("Period (baseline p/ bandas)", min_value=20, max_value=300,
                             value=50, step=5)
 
     precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
@@ -406,12 +406,12 @@ def _metricas_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFr
         gd._card_box("TIPO", tipo_fmt),
         gd._card_box("STRIKE", strike_fmt),
         gd._card_box("VENCIMENTO", vencimento_fmt),
-        gd._card_box("DIAS ÚTEIS", du_fmt),
+        gd._card_box("D.U.", du_fmt),
     ])
     st.html(f'<div class="boxes-row">{linha1}</div>')
 
     linha2 = "".join([
-        gd._card_box("PREÇO AÇÃO", f"{preco_atual:.2f}"),
+        gd._card_box("PREÇO", f"{preco_atual:.2f}"),
         gd._card_box("PREÇO MKT", preco_mkt_fmt),
         gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
         gd._card_box("IV PERCENTIL", iv_pctl_fmt),
@@ -431,7 +431,7 @@ def _grafico_opcao(precos_ind_ativo: pd.DataFrame, ativo_objeto: str, bandas: pd
     st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), use_container_width=True,
              config={"displayModeBar": False}, key="fig_direita")
 
-    '''st.html(
+    st.html(
         f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = média móvel '
         f'simples de {period} períodos sobre o log-preço normalizado de {ativo_objeto} '
         f'(equivalente ao MM_NoTrend do script OMSF/NoTrend, só que com janela ajustável em vez '
@@ -445,7 +445,7 @@ def _grafico_opcao(precos_ind_ativo: pd.DataFrame, ativo_objeto: str, bandas: pd
         f'<code>opcoes_{ativo_objeto}</code> de df_opcoes.xlsx (VENCIMENTO = hoje + D.U. dias '
         f'úteis, sem calendário de feriados). PREÇO TEÓRICO / VOL IMPLÍCITA continuam vindo do '
         f'contrato sintético/CSV selecionado em "Contrato em destaque" na sidebar — ainda não há '
-        f'IV na cadeia real pra recalcular esses dois via Black-Scholes.</div>')'''
+        f'IV na cadeia real pra recalcular esses dois via Black-Scholes.</div>')
 
 
 # ----------------------------------------------------------------------------
