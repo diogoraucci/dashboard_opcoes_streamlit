@@ -9,7 +9,7 @@ CORES = {
     "fundo": "#0b0e14", "painel": "#12161f", "borda": "#232838",
     "texto": "#e6e9f0", "fraco": "#8a91a3",
     "alta": "#2fd48b", "baixa": "#ef5b5b", "neutro": "#f2b632", "accent": "#5b8def",
-    "roxo": "#c25bef",
+    "roxo": "#c25bef", "rosa": "#e0568c",
 }
 
 
@@ -53,42 +53,117 @@ def _fig_gex_profile(gex: dict, ticker: str):
 # GRÁFICOS 2-4: Preço / Volatilidade / RSI (painel direito)
 # ----------------------------------------------------------------------------
 
+def _rolling_percentis(serie: pd.Series, janela: int = 252, p_baixo: float = 0.2, p_alto: float = 0.8):
+    """Percentis móveis (rolling) de uma série (ex.: HV ou RSI), calculados sobre uma
+    janela de `janela` períodos (padrão: 252, ~1 ano útil de pregões).
+
+    `min_periods` menor que a janela cheia permite que as faixas P20/P80 já apareçam
+    no início da série, mesmo antes de existirem 252 observações — evita um trecho
+    inicial todo em branco (NaN) no gráfico.
+    """
+    min_periodos = max(20, janela // 5)
+    p20 = serie.rolling(janela, min_periods=min_periodos).quantile(p_baixo)
+    p80 = serie.rolling(janela, min_periods=min_periodos).quantile(p_alto)
+    return p20, p80
+
+
 def _fig_direita(precos_ind: pd.DataFrame, ticker: str, fonte_vol_nome: str = "Volatilidade Histórica (21 dias)",
-                  bandas: pd.DataFrame = None):
+                  bandas: pd.DataFrame = None, janela_percentil: int = 252):
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.42, 0.28, 0.30],
-        subplot_titles=(f"{ticker} — Preço", fonte_vol_nome + " - Baseada em Retornos", "RSI (14) calculado sobre os Retornos"),
+        subplot_titles=(
+            f"{ticker} — Preço",
+            fonte_vol_nome + f" - Baseada em Retornos (com P20/P80 móveis, janela {janela_percentil})",
+            f"RSI (14) calculado sobre os Retornos (com P20/P80 móveis, janela {janela_percentil})",
+        ),
     )
 
     if bandas is not None:
-        cores_banda = {
-            "banda-3": CORES["baixa"], "banda-2": CORES["baixa"], "banda-1": CORES["baixa"],
-            "banda_0": CORES["accent"],
-            "banda+1": CORES["alta"], "banda+2": CORES["alta"], "banda+3": CORES["alta"],
-        }
-        larguras = {"banda_0": 1.4, "banda+1": 1, "banda-1": 1, "banda+2": 0.8, "banda-2": 0.8,
-                    "banda+3": 0.6, "banda-3": 0.6}
-        for col in ["banda-3", "banda-2", "banda-1", "banda_0", "banda+1", "banda+2", "banda+3"]:
-            if col not in bandas.columns:
-                continue
-            fig.add_trace(go.Scatter(
-                x=bandas.index, y=bandas[col], name=col,
-                line=dict(color=cores_banda[col], width=larguras[col],
-                          dash="solid" if col == "banda_0" else "dot"),
-                opacity=1.0 if col == "banda_0" else 0.75,
-            ), row=1, col=1)
+        # bandas verdes/vermelhas (± 1/2/3 desvios-padrão), sem entrada própria na legenda
+        for n in (3, 2, 1):
+            fig.add_trace(go.Scatter(x=bandas.index, y=bandas[f"banda-{n}"], name=f"Banda -{n}",
+                                      line=dict(color=CORES["baixa"], width=1, dash="dot"),
+                                      opacity=0.35 + 0.15 * (3 - n), showlegend=False), row=1, col=1)
+        for n in (1, 2, 3):
+            fig.add_trace(go.Scatter(x=bandas.index, y=bandas[f"banda+{n}"], name=f"Banda +{n}",
+                                      line=dict(color=CORES["alta"], width=1, dash="dot"),
+                                      opacity=0.35 + 0.15 * (3 - n), showlegend=False), row=1, col=1)
+        # baseline (azul) por cima das bandas
+        fig.add_trace(go.Scatter(x=bandas.index, y=bandas["banda_0"], name="Baseline (EMA)",
+                                  line=dict(color=CORES["accent"], width=1.4, dash="dash"),
+                                  showlegend=False), row=1, col=1)
 
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["fechamento"], name="Preço",
                               line=dict(color=CORES["neutro"], width=1.6)), row=1, col=1)
 
+    if bandas is not None:
+        close = precos_ind["fechamento"].reindex(bandas.index)
+        std = bandas["banda+1"] - bandas["banda_0"]
+        desvio = (close - bandas["banda_0"]) / std
+
+        # Prioridade roxo > azul > rosa (faixas se sobrepõem; cada ponto recebe só a cor mais extrema)
+        mask_roxo = (desvio >= 3) | (desvio <= -3)
+        mask_azul = ~mask_roxo & ((desvio >= 1) | (desvio <= -2))
+        mask_rosa = ~mask_roxo & ~mask_azul & ((desvio >= 1) | (desvio <= -1))
+
+        for mask, cor, nome in (
+            (mask_roxo, CORES["roxo"], "≥3σ / ≤-3σ"),
+            (mask_azul, CORES["accent"], "≥1σ / ≤-2σ"),
+            (mask_rosa, CORES["rosa"], "≥1σ / ≤-1σ"),
+        ):
+            if mask.any():
+                fig.add_trace(go.Scatter(
+                    x=close.index[mask], y=close[mask], mode="markers", name=nome,
+                    marker=dict(color=cor, size=6, line=dict(color=CORES["fundo"], width=0.5)),
+                    showlegend=False,
+                ), row=1, col=1)
+
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["HV"], name="Vol. Histórica",
                               line=dict(color=CORES["accent"], width=1.6)), row=2, col=1)
+
+    # Faixas de percentil móvel (rolling, janela 252) sobre a própria série de HV:
+    # ajudam a contextualizar se a vol. atual está "cara" (perto/acima do P80) ou
+    # "barata" (perto/abaixo do P20) frente ao próprio histórico recente do ativo.
+    hv_p20, hv_p80 = _rolling_percentis(precos_ind["HV"], janela_percentil)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=hv_p80, name=f"HV P80 (rolling {janela_percentil})",
+                              line=dict(color=CORES["roxo"], width=1, dash="dot"),
+                              showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=hv_p20, name=f"HV P20 (rolling {janela_percentil})",
+                              line=dict(color=CORES["rosa"], width=1, dash="dot"),
+                              showlegend=False), row=2, col=1)
+    if pd.notna(hv_p80.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=hv_p80.iloc[-1], xref="x2", yref="y2",
+                            text="P80", showarrow=False, font=dict(size=9, color=CORES["roxo"]),
+                            xanchor="left", xshift=8)
+    if pd.notna(hv_p20.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=hv_p20.iloc[-1], xref="x2", yref="y2",
+                            text="P20", showarrow=False, font=dict(size=9, color=CORES["rosa"]),
+                            xanchor="left", xshift=8)
 
     fig.add_trace(go.Scatter(x=precos_ind.index, y=precos_ind["RSI"], name="RSI",
                               line=dict(color="#e0568c", width=1.6)), row=3, col=1)
     fig.add_hline(y=70, line=dict(color=CORES["accent"], width=1, dash="dot"), row=3, col=1)
     fig.add_hline(y=30, line=dict(color=CORES["roxo"], width=1, dash="dot"), row=3, col=1)
+
+    # Mesma lógica de faixas P20/P80 móveis (janela 252), agora sobre o RSI —
+    # complementa as linhas fixas de sobrecompra/sobrevenda (70/30) com um limiar
+    # que se adapta ao comportamento recente do próprio ativo.
+    rsi_p20, rsi_p80 = _rolling_percentis(precos_ind["RSI"], janela_percentil)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=rsi_p80, name=f"RSI P80 (rolling {janela_percentil})",
+                              line=dict(color=CORES["roxo"], width=1, dash="dot"),
+                              showlegend=False), row=3, col=1)
+    fig.add_trace(go.Scatter(x=precos_ind.index, y=rsi_p20, name=f"RSI P20 (rolling {janela_percentil})",
+                              line=dict(color=CORES["rosa"], width=1, dash="dot"),
+                              showlegend=False), row=3, col=1)
+    if pd.notna(rsi_p80.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=rsi_p80.iloc[-1], xref="x3", yref="y3",
+                            text="P80", showarrow=False, font=dict(size=9, color=CORES["roxo"]),
+                            xanchor="left", xshift=8)
+    if pd.notna(rsi_p20.iloc[-1]):
+        fig.add_annotation(x=precos_ind.index[-1], y=rsi_p20.iloc[-1], xref="x3", yref="y3",
+                            text="P20", showarrow=False, font=dict(size=9, color=CORES["rosa"]),
+                            xanchor="left", xshift=8)
 
     fig.update_layout(
         template="plotly_dark", paper_bgcolor=CORES["fundo"], plot_bgcolor=CORES["painel"],
