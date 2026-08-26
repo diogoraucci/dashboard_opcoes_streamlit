@@ -701,8 +701,245 @@ def conecta_mt5(conta,login, senha):#===========================================
         password=senha,
         portable=False):
         print('Falha ao inicializar o MetaTrader 5', mt5.last_error())
+##########################################################################################
+def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2):
+    import MetaTrader5 as mt5
+    import pandas as pd
+    import multiprocessing
+    import os
+    import time
+    from concurrent.futures import ThreadPoolExecutor
 
-def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
+    conecta_mt5(conta, login, senha)
+
+    # Iniciar contagem de tempo
+    start_time = time.time()
+
+    # CPUs e threads disponíveis
+    print(f"Number of CPU cores: {multiprocessing.cpu_count()}")
+    print(f"Number of threads: {os.cpu_count()}")
+
+    executor = ThreadPoolExecutor(max_workers=os.cpu_count())
+
+    ticksInvalidos = []
+    ticksValidos = []
+
+    # ---------------------------------------------------------
+    # Encontrar um ticker que possua cotações para criar o índice
+    # ---------------------------------------------------------
+    data = None
+
+    for codigo in codigos:
+        try:
+            rates = mt5.copy_rates_from_pos(codigo, tf, 0, cotacoes)
+
+            if rates is not None and len(rates) > 0:
+                data = pd.to_datetime(
+                    pd.DataFrame(rates)['time'],
+                    unit='s'
+                ).astype(str)
+
+                break
+
+        except Exception:
+            continue
+
+    # Nenhum ticker possui cotação
+    if data is None:
+        print("\nNenhum ticker possui cotações.")
+        mt5.shutdown()
+        return pd.DataFrame()
+
+    # ---------------------------------------------------------
+    # Função para coletar cada ticker
+    # ---------------------------------------------------------
+    def fetch_data(i):
+
+        try:
+            rates = mt5.copy_rates_from_pos(
+                i,
+                tf,
+                0,
+                cotacoes
+            )
+
+            # Sem cotação
+            if rates is None or len(rates) == 0:
+                return i, None
+
+            c = pd.DataFrame(rates)
+
+            # Verificar se existem as colunas necessárias
+            if 'time' not in c.columns or 'close' not in c.columns:
+                return i, None
+
+            # Retornar apenas fechamento
+            return i, pd.DataFrame(c['close'].values)
+
+        except Exception:
+            return i, None
+
+    # ---------------------------------------------------------
+    # Coletar dados
+    # ---------------------------------------------------------
+    results = {}
+
+    for codigo, df_cotacao in executor.map(fetch_data, codigos):
+
+        if df_cotacao is not None and not df_cotacao.empty:
+
+            results[codigo] = df_cotacao
+
+        else:
+
+            ticksInvalidos.append(codigo)
+
+            print(
+                f"{codigo} -> sem cotação, "
+                f"ignorando e seguindo para o próximo."
+            )
+
+    executor.shutdown(wait=True)
+
+    # ---------------------------------------------------------
+    # Verificar se algum ticker foi coletado
+    # ---------------------------------------------------------
+    if len(results) == 0:
+
+        print("\nNenhum ticker possui cotações válidas.")
+
+        mt5.shutdown()
+
+        return pd.DataFrame()
+
+    # ---------------------------------------------------------
+    # Concatenar cotações
+    # ---------------------------------------------------------
+    df = pd.concat(
+        list(results.values()),
+        axis=1
+    )
+
+    df.columns = list(results.keys())
+
+    # Garantir que o número de linhas seja igual ao índice de tempo
+    df = df.iloc[:len(data)]
+
+    data = data.iloc[:len(df)]
+
+    df = pd.concat(
+        [data.reset_index(drop=True), df.reset_index(drop=True)],
+        axis=1
+    )
+
+    df.set_index('time', inplace=True)
+
+    # ---------------------------------------------------------
+    # Definir número mínimo de cotações
+    # ---------------------------------------------------------
+    cotacoes_minimas = cotacoes - int(
+        cotacoes * NaN_Maximo
+    )
+
+    # ---------------------------------------------------------
+    # Verificar dados faltantes
+    # ---------------------------------------------------------
+    tab_nan = pd.DataFrame()
+
+    tab_nan['DadosNaN'] = df.isna().sum()
+
+    tab_nan['DadosVálidos'] = (
+        len(df) - tab_nan['DadosNaN']
+    )
+
+    tab_nan['Decisão'] = [
+        'InputarDados'
+        if x >= (cotacoes_minimas * 0.8)
+        and x < cotacoes_minimas
+
+        else 'ExcluirColuna'
+        if x < cotacoes_minimas * 0.8
+
+        else 'DadosOK'
+
+        for x in tab_nan['DadosVálidos']
+    ]
+
+    print(tab_nan)
+
+    # ---------------------------------------------------------
+    # Tickers para imputação e exclusão
+    # ---------------------------------------------------------
+    tickers_input = tab_nan[
+        tab_nan['Decisão'] == 'InputarDados'
+    ].index.to_list()
+
+    tickers_drop = tab_nan[
+        tab_nan['Decisão'] == 'ExcluirColuna'
+    ].index.to_list()
+
+    # ---------------------------------------------------------
+    # Excluir tickers com muitos dados faltantes
+    # ---------------------------------------------------------
+    if len(tickers_drop) > 0:
+
+        df.drop(
+            tickers_drop,
+            axis=1,
+            inplace=True
+        )
+
+    # ---------------------------------------------------------
+    # Preencher dados faltantes
+    # ---------------------------------------------------------
+    df.bfill(inplace=True)
+    df.ffill(inplace=True)
+
+    # ---------------------------------------------------------
+    # Verificar se ainda existem NaN
+    # ---------------------------------------------------------
+    linhas_com_valores_faltantes = (
+        df[df.isnull().any(axis=1)].index.tolist()
+    )
+
+    colunas_com_valores_faltantes = (
+        df.columns[df.isnull().any()].tolist()
+    )
+
+    # ---------------------------------------------------------
+    # Informar tickers excluídos
+    # ---------------------------------------------------------
+    if len(tickers_drop) > 0:
+
+        print(
+            tickers_drop,
+            '\nTickers sem cotações ou com cotações insuficientes\n'
+        )
+
+        ticksInvalidos = (
+            ticksInvalidos + tickers_drop
+        )
+
+    # ---------------------------------------------------------
+    # Tickers válidos
+    # ---------------------------------------------------------
+    ticksValidos = df.columns.to_list()
+
+    # ---------------------------------------------------------
+    # Finalizar contagem de tempo
+    # ---------------------------------------------------------
+    end_time = time.time()
+
+    print(
+        f"\nA célula levou "
+        f"{end_time - start_time:.2f} segundos para rodar.\n"
+    )
+
+    # Encerrar MT5
+    mt5.shutdown()
+
+    return df
+'''def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
     import MetaTrader5 as mt5
     import pandas as pd
     import multiprocessing
@@ -721,7 +958,7 @@ def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2
     print(f"Number of threads: {os.cpu_count()}")
     # Cria uma ThreadPoolExecutor com o número de threads disponíveis
     executor = ThreadPoolExecutor(max_workers=os.cpu_count())
-    
+        
     data = pd.DataFrame(mt5.copy_rates_from_pos(codigos[0], tf, 0, cotacoes))['time']
 
     data = pd.to_datetime(data, unit='s').astype(str)
@@ -794,7 +1031,7 @@ def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2
     #tempoExecussao = (f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.")
    
     mt5.shutdown()
-    return df #, ticksInvalidos, ticksValidos
+    return df #, ticksInvalidos, ticksValidos'''
 
 
 # ==========================================
