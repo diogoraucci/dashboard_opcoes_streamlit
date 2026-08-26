@@ -701,245 +701,8 @@ def conecta_mt5(conta,login, senha):#===========================================
         password=senha,
         portable=False):
         print('Falha ao inicializar o MetaTrader 5', mt5.last_error())
-##########################################################################################
-def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2):
-    import MetaTrader5 as mt5
-    import pandas as pd
-    import multiprocessing
-    import os
-    import time
-    from concurrent.futures import ThreadPoolExecutor
 
-    conecta_mt5(conta, login, senha)
-
-    # Iniciar contagem de tempo
-    start_time = time.time()
-
-    # CPUs e threads disponíveis
-    print(f"Number of CPU cores: {multiprocessing.cpu_count()}")
-    print(f"Number of threads: {os.cpu_count()}")
-
-    executor = ThreadPoolExecutor(max_workers=os.cpu_count())
-
-    ticksInvalidos = []
-    ticksValidos = []
-
-    # ---------------------------------------------------------
-    # Encontrar um ticker que possua cotações para criar o índice
-    # ---------------------------------------------------------
-    data = None
-
-    for codigo in codigos:
-        try:
-            rates = mt5.copy_rates_from_pos(codigo, tf, 0, cotacoes)
-
-            if rates is not None and len(rates) > 0:
-                data = pd.to_datetime(
-                    pd.DataFrame(rates)['time'],
-                    unit='s'
-                ).astype(str)
-
-                break
-
-        except Exception:
-            continue
-
-    # Nenhum ticker possui cotação
-    if data is None:
-        print("\nNenhum ticker possui cotações.")
-        mt5.shutdown()
-        return pd.DataFrame()
-
-    # ---------------------------------------------------------
-    # Função para coletar cada ticker
-    # ---------------------------------------------------------
-    def fetch_data(i):
-
-        try:
-            rates = mt5.copy_rates_from_pos(
-                i,
-                tf,
-                0,
-                cotacoes
-            )
-
-            # Sem cotação
-            if rates is None or len(rates) == 0:
-                return i, None
-
-            c = pd.DataFrame(rates)
-
-            # Verificar se existem as colunas necessárias
-            if 'time' not in c.columns or 'close' not in c.columns:
-                return i, None
-
-            # Retornar apenas fechamento
-            return i, pd.DataFrame(c['close'].values)
-
-        except Exception:
-            return i, None
-
-    # ---------------------------------------------------------
-    # Coletar dados
-    # ---------------------------------------------------------
-    results = {}
-
-    for codigo, df_cotacao in executor.map(fetch_data, codigos):
-
-        if df_cotacao is not None and not df_cotacao.empty:
-
-            results[codigo] = df_cotacao
-
-        else:
-
-            ticksInvalidos.append(codigo)
-
-            print(
-                f"{codigo} -> sem cotação, "
-                f"ignorando e seguindo para o próximo."
-            )
-
-    executor.shutdown(wait=True)
-
-    # ---------------------------------------------------------
-    # Verificar se algum ticker foi coletado
-    # ---------------------------------------------------------
-    if len(results) == 0:
-
-        print("\nNenhum ticker possui cotações válidas.")
-
-        mt5.shutdown()
-
-        return pd.DataFrame()
-
-    # ---------------------------------------------------------
-    # Concatenar cotações
-    # ---------------------------------------------------------
-    df = pd.concat(
-        list(results.values()),
-        axis=1
-    )
-
-    df.columns = list(results.keys())
-
-    # Garantir que o número de linhas seja igual ao índice de tempo
-    df = df.iloc[:len(data)]
-
-    data = data.iloc[:len(df)]
-
-    df = pd.concat(
-        [data.reset_index(drop=True), df.reset_index(drop=True)],
-        axis=1
-    )
-
-    df.set_index('time', inplace=True)
-
-    # ---------------------------------------------------------
-    # Definir número mínimo de cotações
-    # ---------------------------------------------------------
-    cotacoes_minimas = cotacoes - int(
-        cotacoes * NaN_Maximo
-    )
-
-    # ---------------------------------------------------------
-    # Verificar dados faltantes
-    # ---------------------------------------------------------
-    tab_nan = pd.DataFrame()
-
-    tab_nan['DadosNaN'] = df.isna().sum()
-
-    tab_nan['DadosVálidos'] = (
-        len(df) - tab_nan['DadosNaN']
-    )
-
-    tab_nan['Decisão'] = [
-        'InputarDados'
-        if x >= (cotacoes_minimas * 0.8)
-        and x < cotacoes_minimas
-
-        else 'ExcluirColuna'
-        if x < cotacoes_minimas * 0.8
-
-        else 'DadosOK'
-
-        for x in tab_nan['DadosVálidos']
-    ]
-
-    print(tab_nan)
-
-    # ---------------------------------------------------------
-    # Tickers para imputação e exclusão
-    # ---------------------------------------------------------
-    tickers_input = tab_nan[
-        tab_nan['Decisão'] == 'InputarDados'
-    ].index.to_list()
-
-    tickers_drop = tab_nan[
-        tab_nan['Decisão'] == 'ExcluirColuna'
-    ].index.to_list()
-
-    # ---------------------------------------------------------
-    # Excluir tickers com muitos dados faltantes
-    # ---------------------------------------------------------
-    if len(tickers_drop) > 0:
-
-        df.drop(
-            tickers_drop,
-            axis=1,
-            inplace=True
-        )
-
-    # ---------------------------------------------------------
-    # Preencher dados faltantes
-    # ---------------------------------------------------------
-    df.bfill(inplace=True)
-    df.ffill(inplace=True)
-
-    # ---------------------------------------------------------
-    # Verificar se ainda existem NaN
-    # ---------------------------------------------------------
-    linhas_com_valores_faltantes = (
-        df[df.isnull().any(axis=1)].index.tolist()
-    )
-
-    colunas_com_valores_faltantes = (
-        df.columns[df.isnull().any()].tolist()
-    )
-
-    # ---------------------------------------------------------
-    # Informar tickers excluídos
-    # ---------------------------------------------------------
-    if len(tickers_drop) > 0:
-
-        print(
-            tickers_drop,
-            '\nTickers sem cotações ou com cotações insuficientes\n'
-        )
-
-        ticksInvalidos = (
-            ticksInvalidos + tickers_drop
-        )
-
-    # ---------------------------------------------------------
-    # Tickers válidos
-    # ---------------------------------------------------------
-    ticksValidos = df.columns.to_list()
-
-    # ---------------------------------------------------------
-    # Finalizar contagem de tempo
-    # ---------------------------------------------------------
-    end_time = time.time()
-
-    print(
-        f"\nA célula levou "
-        f"{end_time - start_time:.2f} segundos para rodar.\n"
-    )
-
-    # Encerrar MT5
-    mt5.shutdown()
-
-    return df
-'''def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
+def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
     import MetaTrader5 as mt5
     import pandas as pd
     import multiprocessing
@@ -958,7 +721,7 @@ def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2
     print(f"Number of threads: {os.cpu_count()}")
     # Cria uma ThreadPoolExecutor com o número de threads disponíveis
     executor = ThreadPoolExecutor(max_workers=os.cpu_count())
-        
+    
     data = pd.DataFrame(mt5.copy_rates_from_pos(codigos[0], tf, 0, cotacoes))['time']
 
     data = pd.to_datetime(data, unit='s').astype(str)
@@ -1031,7 +794,7 @@ def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2
     #tempoExecussao = (f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.")
    
     mt5.shutdown()
-    return df #, ticksInvalidos, ticksValidos'''
+    return df #, ticksInvalidos, ticksValidos
 
 
 # ==========================================
@@ -2665,3 +2428,249 @@ def loog_classificacao_vol(tickers):
     
     return df_class_vol
 
+def conecta_mt5(conta,login, senha):#====================================================== 
+    import pandas as pd
+    import MetaTrader5 as mt5
+    
+    # logar no mt5
+    #1.1 Coletando cotações----
+    if not mt5.initialize(
+        login=conta,
+        server=login,
+        password=senha,
+        portable=False):
+        print('Falha ao inicializar o MetaTrader 5', mt5.last_error())
+
+def cotacoes_mt5_list(codigos, tf, cotacoes, conta, login, senha, NaN_Maximo=0.2): 
+    import MetaTrader5 as mt5
+    import pandas as pd
+    import multiprocessing
+    import os
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+     
+    
+    conecta_mt5(conta, login, senha)
+
+   # Iniciar Contagem de Tempo de Execussão da Célula
+    start_time = time.time()
+    
+    # Imprime o número de CPUs e threads disponíveis
+    print(f"Number of CPU cores: {multiprocessing.cpu_count()}")
+    print(f"Number of threads: {os.cpu_count()}")
+    # Cria uma ThreadPoolExecutor com o número de threads disponíveis
+    executor = ThreadPoolExecutor(max_workers=os.cpu_count())
+    
+    data = pd.DataFrame(mt5.copy_rates_from_pos(codigos[0], tf, 0, cotacoes))['time']
+
+    data = pd.to_datetime(data, unit='s').astype(str)
+    ticksInvalidos = []
+    ticksValidos = []
+
+    # Define a função a ser executada em cada thread
+    def fetch_data(i):
+        try:
+            c = mt5.copy_rates_from_pos(i, tf, 0, cotacoes)[['time', 'close']]
+            #time.sleep(0.02)
+            return i, pd.DataFrame(c['close'])
+        except:
+            return i, None
+
+    # Executa a função fetch_data em cada thread e armazena os resultados em um dicionário
+    results = {}
+    for codigo, df in executor.map(fetch_data, codigos):
+        if df is not None:
+            results[codigo] = df
+        else:
+            ticksInvalidos.append(codigo)
+
+    # Concatena os dataframes de cada código em um único dataframe
+    df = pd.concat(list(results.values()), axis=1)
+    df.columns = [codigo for codigo in results.keys()]
+    df = pd.concat([data,df], axis=1)
+    df.set_index('time', inplace=True)
+    
+    # Definir Número De Cotações Mínimas Por Ativo
+    cotacoes_minimas = cotacoes - int(cotacoes * NaN_Maximo)
+
+    # Verificar auxência de dados faltantes
+    tab_nan = pd.DataFrame()
+    tab_nan['DadosNaN'] = df.isna().sum()
+    tab_nan['DadosVálidos'] = len(df) - tab_nan['DadosNaN']
+    tab_nan['Decisão'] = [#'DadosOK' if x >= cotacoes_minimas else 
+                          'InputarDados' if x >= (cotacoes_minimas * 0.8) and x < cotacoes_minimas else
+                          'ExcluirColuna' if x < cotacoes_minimas * 0.8 else
+                          'DadosOK'
+                          for x in tab_nan['DadosVálidos']]
+    print(tab_nan)
+    
+    
+    # Definir Tickers que Serão Excluidose Tickers que Serão Inputados
+    tickers_input = tab_nan[tab_nan['Decisão'] == 'InputarDados'].index.to_list()
+    tickers_drop = tab_nan[tab_nan['Decisão'] == 'ExcluirColuna'].index.to_list()
+
+    # Excluir Tikcer com Muitos Dados Flatantes
+    df.drop(tickers_drop,axis=1,inplace=True)
+
+    # Inputar Dados Faltantes
+    df.bfill(inplace=True)
+    df.ffill(inplace=True)
+
+    # Encontrando os índices das linhas com valores nulos
+    linhas_com_valores_faltantes = df[df.isnull().any(axis=1)].index.tolist()
+    colunas_com_valores_faltantes = df.columns[df.isnull().any()].tolist()
+    
+    if len(tickers_drop) > 0:
+        print(tickers_drop, '\nTickers Sem Cotaçõe ou Com Cotações insuficientes\n')
+        ticksInvalidos = ticksInvalidos + tickers_drop
+
+    # Adiciona as informações dos ticks válidos e inválidos aos respectivos arrays
+    ticksValidos = df.columns.to_list()
+
+    # Finalizar Contagem de Tempo de Execussão da Célula
+    end_time = time.time()
+    print(f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.\n")
+    #tempoExecussao = (f"\nA célula levou {end_time - start_time:.2f} segundos para rodar.")
+   
+    mt5.shutdown()
+    return df #, ticksInvalidos, ticksValidos
+
+
+
+import numpy as np
+import pandas as pd
+
+
+def classificar_tickers_b3_mt5(
+    df_cotacoes,
+    mm=120
+):
+
+    resultados = []
+
+    for ticker in df_cotacoes.columns:
+
+        try:
+
+            # =====================================================
+            # DADOS DO TICKER
+            # =====================================================
+
+            df = pd.DataFrame(
+                df_cotacoes[ticker]
+            ).copy()
+
+            df.columns = ["Close"]
+
+            df = df.dropna()
+
+            if len(df) < 300:
+
+                resultados.append({
+                    "Ticker": ticker,
+                    "Classificacao": np.nan,
+                    "Erro": "Dados insuficientes"
+                })
+
+                continue
+
+            # =====================================================
+            # CLOSE EM LOG
+            # =====================================================
+
+            df["Close"] = np.log(
+                df["Close"] / df["Close"].shift(1)
+            ).cumsum()
+
+            # =====================================================
+            # VOLATILIDADE
+            # =====================================================
+
+            df["VOL"] = (
+                df["Close"]
+                .rolling(21)
+                .std() * np.sqrt(252)
+            )
+
+            # =====================================================
+            # PERCENTIS DA VOLATILIDADE
+            # =====================================================
+
+            df["VOL_P80"] = (
+                df["VOL"]
+                .rolling(252)
+                .quantile(0.75)
+            )
+
+            df["VOL_P20"] = (
+                df["VOL"]
+                .rolling(252)
+                .quantile(0.20)
+            )
+
+            # =====================================================
+            # CLASSIFICAÇÃO DA VOLATILIDADE
+            # =====================================================
+
+            df["classVol"] = np.select(
+                [
+                    df["VOL"] < df["VOL_P20"],
+                    df["VOL"] > df["VOL_P80"]
+                ],
+                [
+                    "baixa",
+                    "alta"
+                ],
+                default="neutra"
+            )
+
+            # =====================================================
+            # MUDANÇA DE REGIME
+            # =====================================================
+
+            anterior = df["classVol"].shift(1)
+            atual = df["classVol"]
+
+            df["VolChange"] = np.select(
+                [
+                    (anterior == "baixa") & (atual == "neutra"),
+                    (anterior == "neutra") & (atual == "alta"),
+                    (anterior == "alta") & (atual == "neutra"),
+                    (anterior == "neutra") & (atual == "baixa")
+                ],
+                [
+                    "baixa_neutra",
+                    "neutra_alta",
+                    "alta_neutra",
+                    "neutra_baixa"
+                ],
+                default="-"
+            )
+
+            # =====================================================
+            # CLASSIFICAÇÃO DE HOJE
+            # =====================================================
+
+            classificacao = df["VolChange"].iloc[-1]
+
+            if classificacao == "-":
+                classificacao = df["classVol"].iloc[-1]
+
+            # =====================================================
+            # RESULTADO
+            # =====================================================
+
+            resultados.append({
+                "Ticker": ticker,
+                "Classificacao": classificacao
+            })
+
+        except Exception as e:
+
+            resultados.append({
+                "Ticker": ticker,
+                "Classificacao": np.nan,
+                "Erro": str(e)
+            })
+
+    return pd.DataFrame(resultados)
