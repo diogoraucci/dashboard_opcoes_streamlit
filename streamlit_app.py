@@ -7,10 +7,26 @@ Reaproveita 100% da engine de cálculo e dos gráficos originais:
   - gerar_dashboard.py -> NÃO foi alterado. Suas funções `_fig_gex_profile`,
                          `_fig_direita`, `_card`, `_card_box`, `_tabela_pin_candidates`
                          e `_tabela_zonas` são importadas e reaproveitadas na íntegra,
-                         então os dois painéis mantêm exatamente o mesmo visual
-                         (cores, cards, tabelas) da versão HTML estática. A função
-                         `gerar_dashboard()` original continua disponível para exportar
-                         o HTML estático como download, se você quiser manter esse uso.
+                         então cards, tabelas, badges e gráficos mantêm exatamente o
+                         mesmo visual (cores, fontes, layout interno) da versão HTML
+                         estática. A função `gerar_dashboard()` original continua
+                         disponível para exportar o HTML estático como download, se
+                         você quiser manter esse uso.
+
+Layout (2 colunas, proporção 2:3 — ver imagem de referência):
+  - Coluna ESQUERDA (métricas): seletores (Ativo-objeto / CÓDIGO / Period) +
+    todos os boxes/cards/tabelas — tanto os da opção (TIPO, STRIKE, VENCIMENTO,
+    D.U., PREÇO, IV RANK/PERCENTIL, VOL...) quanto os do GEX (WALLS, GAMMA FLIP,
+    PCR, SPOT, Pin Candidates, Significant GEX Zones) — nessa ordem, um empilhado
+    no outro, dentro do MESMO container.
+  - Coluna DIREITA (gráficos): os 4 gráficos empilhados — Preço/Volatilidade/RSI
+    (subplot único, `_fig_direita`) e, embaixo, o Gamma Exposure Profile
+    (`_fig_gex_profile`) — cada um seguido do seu disclaimer.
+  Antes desta versão, o app usava 2 colunas 50/50 onde cada painel (GEX /
+  Opção) trazia junto suas próprias métricas E seu próprio gráfico; agora as
+  métricas de ambos ficam juntas à esquerda e os gráficos de ambos ficam juntos
+  à direita — só rearranjo de camada de apresentação, cálculo e conteúdo
+  idênticos (ver `_metricas_gex`/`_grafico_gex` e `_metricas_opcao`/`_grafico_opcao`).
 
 O que mudou é só a camada de entrada/saída:
   - argparse (--codigo, --vencimento, --dir)  -> controles na sidebar
@@ -26,7 +42,6 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-
 import pandas as pd
 import streamlit as st
 
@@ -152,6 +167,47 @@ def carregar_class_vol() -> pd.DataFrame:
     return df.set_index("ticker")
 
 
+def _localizar_caminho_opcoes() -> Path:
+    """Aceita tanto 'df_opcoes.xlsx' quanto 'df_opcoess.xlsx' (nome usado no
+    export original da raspagem) — evita quebrar o app por causa de um 's' a
+    mais/a menos no nome do arquivo. Se nenhum dos dois existir, devolve o
+    nome canônico mesmo assim (o erro de arquivo-não-encontrado aparece só
+    quando o pandas tentar ler, com uma mensagem clara)."""
+    base = Path(__file__).resolve().parent
+    for nome in ("df_opcoes.xlsx", "df_opcoess.xlsx"):
+        candidato = base / nome
+        if candidato.exists():
+            return candidato
+    return base / "df_opcoes.xlsx"
+
+
+CAMINHO_OPCOES = _localizar_caminho_opcoes()
+
+
+@st.cache_data(show_spinner="Carregando cadeia de opções real (df_opcoes.xlsx)...")
+def carregar_df_opcoes(ativo_objeto: str) -> pd.DataFrame:
+    """Lê df_opcoes.xlsx (ou df_opcoess.xlsx), aba 'opcoes_{ativo_objeto}' —
+    snapshot real da cadeia de opções do ativo-objeto selecionado (raspagem
+    OPCOES.NET). Colunas esperadas nessa aba: 'Ticker' (código da opção, ex:
+    PETRH834), 'Strike', 'Último' (preço de mercado), 'Dias úteis' (até o
+    vencimento) e 'Tipo' (CALL/PUT). Se a aba não existir para o ativo pedido,
+    o pandas levanta ValueError — tratado no call site."""
+    df = pd.read_excel(CAMINHO_OPCOES, sheet_name=f"opcoes_{ativo_objeto}")
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")])
+    return df
+
+
+def _vencimento_por_dias_uteis(dias_uteis) -> pd.Timestamp:
+    """Data de hoje + `dias_uteis` dias ÚTEIS (sem calendário de feriados —
+    mesma convenção 'só fins de semana' usada em motor_calculo.dias_uteis_ate,
+    que usa np.busday_count puro). dias_uteis<=0 -> hoje."""
+    hoje = pd.Timestamp.today().normalize()
+    du = int(dias_uteis)
+    if du <= 0:
+        return hoje
+    return hoje + pd.tseries.offsets.BDay(du)
+
+
 @st.cache_data(show_spinner="Gerando dados sintéticos de exemplo...")
 def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
     """Gera os 3 CSVs sintéticos (gerar_dados_exemplo.py, inalterado) direto
@@ -170,47 +226,40 @@ def gerar_dados_exemplo_em_disco(ticker: str, diretorio: str):
     params.to_csv(Path(diretorio, "parametros.csv"), index=False)
 
 
-@st.cache_data(show_spinner="Calculando bandas de desvio-padrão (log-retorno)...")
-def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int,
-                                 janela_std: int = 252) -> pd.DataFrame:
-    """Porta o cálculo enviado: 'close' vira log-retorno acumulado (não preço
-    bruto), MM_NoTrend = média móvel simples de `period` pontos sobre essa série
-    (era fixo em 60 no código original — agora usa o slider), Close_NoTrend =
-    desvio em relação a essa média, e o desvio-padrão é em janela móvel de
-    `janela_std` pontos (= adf_window=252 do código original).
+@st.cache_data(show_spinner="Calculando bandas de desvio-padrão...")
+def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int) -> pd.DataFrame:
+    """Porta fielmente a lógica do script OMSF/NoTrend enviado:
 
-    Duas adaptações deliberadas em relação ao código enviado:
-    1. Não portei o teste ADF (adfuller) do loop original — ele não é usado
-       pro gráfico de preço, e rodar adfuller() ponto a ponto num loop Python
-       é lento; o desvio-padrão em janela móvel dá o mesmo valor numérico via
-       .rolling().std() vetorizado, sem o custo do teste estatístico.
-    2. min_periods menor que a janela cheia (60, não 252) pro desvio-padrão —
-       sem isso, com period=300 no slider, sobra pouca história após o dropna
-       inicial e as bandas ficariam vazias (NaN) em boa parte do gráfico.
-
-    Como o cálculo roda em espaço de log-retorno, as bandas voltam pra escala
-    de preço (R$) via preco_ref * exp(valor) — a mesma transformação inversa
-    que reconstrói exatamente a série original de fechamento.
+      1) Normalização logarítmica do fechamento: log(close / close[0]).
+      2) MM_NoTrend = média móvel SIMPLES (rolling), agora com janela = `period`
+         (o slider "Period (EMA baseline p/ bandas)" — deixou de ser EMA e
+         passou a ser a mesma rolling mean do script original, só que com
+         janela ajustável em vez do 90 fixo).
+      3) Close_NoTrend = log-close - MM_NoTrend.
+      4) STD = desvio-padrão ROLLING (janela 252, como no script original) de
+         Close_NoTrend — portanto, como STD é calculado em cima de
+         Close_NoTrend, ele muda automaticamente junto com `period`.
+      5) Bandas = MM_NoTrend ± N*STD, calculadas em escala log e depois
+         projetadas de volta pra escala de preço (R$) via exp(), pra continuar
+         sobrepondo corretamente o gráfico de preço existente.
     """
-    fechamento = precos_ind_ativo["fechamento"]
-    preco_ref = float(fechamento.iloc[0])
+    close = precos_ind_ativo["fechamento"]
+    preco_base = close.iloc[0]
 
-    log_cum = np.log(fechamento / fechamento.shift(1)).cumsum().dropna()
+    log_close = np.log(close / preco_base)
+    mm_no_trend = log_close.rolling(period).mean()
+    close_no_trend = log_close - mm_no_trend
+    std = close_no_trend.rolling(252).std()
 
-    mm_no_trend = log_cum.rolling(period, min_periods=period).mean()
-    close_no_trend = log_cum - mm_no_trend
-
-    min_periods_std = min(60, janela_std)
-    std = close_no_trend.rolling(janela_std, min_periods=min_periods_std).std()
-
-    bandas_log = pd.DataFrame(index=log_cum.index)
+    bandas_log = pd.DataFrame(index=precos_ind_ativo.index)
     bandas_log["banda_0"] = mm_no_trend
     for n in (1, 2, 3):
         bandas_log[f"banda+{n}"] = mm_no_trend + std * n
         bandas_log[f"banda-{n}"] = mm_no_trend - std * n
 
-    bandas = np.exp(bandas_log) * preco_ref
-    return bandas.reindex(precos_ind_ativo.index)
+    # volta pra escala de preço (R$): preco = preco_base * exp(log_normalizado)
+    bandas = np.exp(bandas_log) * preco_base
+    return bandas
 
 
 # ----------------------------------------------------------------------------
@@ -218,48 +267,53 @@ def bandas_desvio_padrao_cached(precos_ind_ativo: pd.DataFrame, period: int,
 # nativamente (st.plotly_chart) em vez de embutir fig.to_html().
 # ----------------------------------------------------------------------------
 
-def _painel_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
+def _metricas_gex(gex: dict, ticker: str, data_ref: pd.Timestamp):
+    """Título + cards + tabelas do painel GEX (SEM o gráfico) — coluna
+    ESQUERDA (métricas) do layout novo."""
     venc_str = pd.Timestamp(gex["vencimento_alvo"]).strftime("%d %b %Y")
     hoje_str = pd.Timestamp(data_ref).strftime("%d %b %Y")
 
-    with st.container(border=True):
-        st.html(
-            f'<div class="titulo-painel">GEX {ticker}: snapshot {hoje_str} '
-            f'&bull; expiry {venc_str}</div>')
+    st.html(
+        f'<div class="titulo-painel">GEX {ticker}: snapshot {hoje_str} '
+        f'&bull; expiry {venc_str}</div>')
 
-        linha1 = "".join([
-            gd._card("WALLS (C/P)", f"{gex['call_wall']:.2f} / {gex['put_wall']:.2f}"),
-            gd._card("GAMMA FLIP", f"{gex['gamma_flip']:.2f}", CORES["neutro"]),
-            gd._card("PCR (GLOBAL)", f"{gex['pcr']:.2f}"),
-            gd._card("SPOT", f"{gex['spot']:.2f}"),
-        ])
-        st.html(f'<div class="cards-row">{linha1}</div>')
+    linha1 = "".join([
+        gd._card("WALLS (C/P)", f"{gex['call_wall']:.2f} / {gex['put_wall']:.2f}"),
+        gd._card("GAMMA FLIP", f"{gex['gamma_flip']:.2f}", CORES["neutro"]),
+        gd._card("PCR (GLOBAL)", f"{gex['pcr']:.2f}"),
+        gd._card("SPOT", f"{gex['spot']:.2f}"),
+    ])
+    st.html(f'<div class="cards-row">{linha1}</div>')
 
-        st.html('<div class="subtitulo">Pin Candidates (&plusmn;5% from spot)</div>')
-        st.html(gd._tabela_pin_candidates(gex["pin_candidates"]))
+    st.html('<div class="subtitulo">Pin Candidates (&plusmn;5% from spot)</div>')
+    st.html(gd._tabela_pin_candidates(gex["pin_candidates"]))
 
-        cor_sent = (CORES["baixa"] if gex["sentiment"] == "Bearish"
-                    else CORES["alta"] if gex["sentiment"] == "Bullish" else CORES["fraco"])
-        linha2 = "".join([
-            gd._card("PCR (OI)", f"{gex['pcr']:.2f}"),
-            gd._card("SENTIMENT", gex["sentiment"], cor_sent),
-            gd._card("IV SKEW", f"{gex['iv_skew']:.2f}%"),
-            gd._card("REGIME", gex["regime"], CORES["neutro"]),
-            gd._card("FLIP DIST.", f"{gex['flip_dist']:.2f}%"),
-            gd._card("HEDGING", gex["hedging"]),
-        ])
-        st.html(f'<div class="cards-row cards-row-3">{linha2}</div>')
+    cor_sent = (CORES["baixa"] if gex["sentiment"] == "Bearish"
+                else CORES["alta"] if gex["sentiment"] == "Bullish" else CORES["fraco"])
+    linha2 = "".join([
+        gd._card("PCR (OI)", f"{gex['pcr']:.2f}"),
+        gd._card("SENTIMENT", gex["sentiment"], cor_sent),
+        gd._card("IV SKEW", f"{gex['iv_skew']:.2f}%"),
+        gd._card("REGIME", gex["regime"], CORES["neutro"]),
+        gd._card("FLIP DIST.", f"{gex['flip_dist']:.2f}%"),
+        gd._card("HEDGING", gex["hedging"]),
+    ])
+    st.html(f'<div class="cards-row cards-row-3">{linha2}</div>')
 
-        st.html('<div class="subtitulo">Significant GEX Zones</div>')
-        st.html(gd._tabela_zonas(gex["zonas_significativas"]))
+    st.html('<div class="subtitulo">Significant GEX Zones</div>')
+    st.html(gd._tabela_zonas(gex["zonas_significativas"]))
 
-        st.plotly_chart(gd._fig_gex_profile(gex, ticker), width='stretch',
-                         config={"displayModeBar": False}, key="fig_gex")
 
-        st.html(
-            '<div class="disclaimer">Convenção assumida: dealers líquidos COMPRADOS em calls e '
-            'VENDIDOS em puts (padrão usado por trackers públicos de GEX). Ajuste o sinal no '
-            'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
+def _grafico_gex(gex: dict, ticker: str):
+    """Gráfico de perfil de GEX (SEM as métricas) — coluna DIREITA (gráficos)
+    do layout novo, embaixo do gráfico de Preço/Vol/RSI."""
+    st.plotly_chart(gd._fig_gex_profile(gex, ticker), use_container_width=True,
+             config={"displayModeBar": False}, key="fig_gex")
+
+    st.html(
+        '<div class="disclaimer">Convenção assumida: dealers líquidos COMPRADOS em calls e '
+        'VENDIDOS em puts (padrão usado por trackers públicos de GEX). Ajuste o sinal no '
+        'código se a sua fonte de dados indicar o oposto para este ativo/mercado.</div>')
 
 
 CORES_CLASSIFICACAO = {
@@ -276,66 +330,122 @@ def _badge(valor_fmt: str, classe: str) -> str:
             f'{classe}</span>')
 
 
-def _painel_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFrame, ticker_atual: str):
-    with st.container(border=True):
-        ativos = df_cotacoes.columns.tolist()
-        idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
+def _metricas_opcao(opcao: dict, df_cotacoes: pd.DataFrame, class_vol: pd.DataFrame, ticker_atual: str):
+    """Seletores (Ativo-objeto / CÓDIGO / Period) + boxes de métricas do
+    contrato (SEM o gráfico) — coluna ESQUERDA (métricas) do layout novo.
+    Devolve os dados que o gráfico de Preço/Vol/RSI precisa, pra serem
+    usados depois na coluna DIREITA (gráficos)."""
+    ativos = df_cotacoes.columns.tolist()
+    idx_default = ativos.index(ticker_atual) if ticker_atual in ativos else 0
 
-        col_ativo, col_period = st.columns(2)
-        with col_ativo:
-            ativo_objeto = st.selectbox(
-                "Ativo-objeto", ativos, index=idx_default,
-                help="Universo de df_cotacoes.xlsx — independente do ticker/cadeia de opções "
-                     "carregado na sidebar.")
-        with col_period:
-            period = st.slider("Period (janela da MM p/ bandas)", min_value=20, max_value=300,
-                                value=50, step=5)
+    col_ativo, col_codigo, col_period = st.columns([1.1, 1.3, 0.9])
+    with col_ativo:
+        ativo_objeto = st.selectbox(
+            "Ativo-objeto", ativos, index=idx_default,
+            help="Universo de df_cotacoes.xlsx (aba 'cotacoes') — independente do ticker/cadeia "
+                 "de opções carregado na sidebar.")
 
-        precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
-        preco_atual = float(precos_ind_ativo["fechamento"].iloc[-1])
-        bandas = bandas_desvio_padrao_cached(precos_ind_ativo, period)
+    # -- Cadeia de opções REAL do ativo-objeto (df_opcoes.xlsx, aba
+    # 'opcoes_{ativo_objeto}'). O seletor CÓDIGO é montado a partir da
+    # coluna 'Ticker' dessa aba, igual ao seletor Ativo-objeto é montado
+    # a partir das colunas de df_cotacoes.xlsx.
+    linha_opcao = None
+    try:
+        df_opcoes_ativo = carregar_df_opcoes(ativo_objeto)
+    except FileNotFoundError:
+        df_opcoes_ativo = None
+    except ValueError:
+        # aba 'opcoes_{ativo_objeto}' não existe pra esse ativo
+        df_opcoes_ativo = None
 
-        if ativo_objeto in class_vol.index:
-            lv = class_vol.loc[ativo_objeto]
-            vol_hist_fmt = _badge(f"{lv['Vol_Realizada']:.2f}%", lv["Vol_Hist_class"])
-            iv_rank_fmt = _badge(f"{lv['Vol_Rank']:.2f}%", lv["Vol_Rank_class"])
-            iv_pctl_fmt = _badge(f"{lv['Vol_Percentil']:.2f}%", lv["Vol_Perc_class"])
+    with col_codigo:
+        if df_opcoes_ativo is not None and "Ticker" in df_opcoes_ativo.columns and len(df_opcoes_ativo):
+            codigos_opcao = sorted(df_opcoes_ativo["Ticker"].astype(str).unique())
+            codigo_opcao_sel = st.selectbox(
+                "CÓDIGO OPÇÃO", codigos_opcao, key=f"codigo_opcao_{ativo_objeto}",
+                help=f"Contratos da aba 'opcoes_{ativo_objeto}' em df_opcoes.xlsx.")
+            linha_opcao = df_opcoes_ativo.loc[
+                df_opcoes_ativo["Ticker"].astype(str) == codigo_opcao_sel].iloc[0]
         else:
-            vol_hist_fmt = iv_rank_fmt = iv_pctl_fmt = "— (sem linha em class_vol)"
+            st.selectbox("CÓDIGO", ["— sem aba opcoes_" + ativo_objeto + " —"], disabled=True)
 
-        linha1 = "".join([
-            gd._card_box("TICKER", ativo_objeto),
-            gd._card_box("STRIKE", f"{opcao['strike']:.2f}"),
-            gd._card_box("VENCIMENTO", pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")),
-            gd._card_box("PREÇO MKT", f"{opcao['preco_mercado']:.2f}"),
-            gd._card_box("IV PERCENTIL", iv_pctl_fmt),
-            gd._card_box("VOL HISTÓRICA", vol_hist_fmt),
-        ])
-        st.html(f'<div class="boxes-row">{linha1}</div>')
+    with col_period:
+        period = st.slider("Period (Média Móvel)", min_value=20, max_value=300,
+                            value=50, step=5)
 
-        linha2 = "".join([
-            gd._card_box("PREÇO", f"{preco_atual:.2f}"),
-            gd._card_box("CÓDIGO", opcao["codigo"]),
-            gd._card_box("D.U.", f"{opcao['dias_uteis']} DIA(S)"),
-            gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
-            gd._card_box("IV RANK", iv_rank_fmt),
-            gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
-        ])
-        st.html(f'<div class="boxes-row">{linha2}</div>')
+    precos_ind_ativo = indicadores_ativo_cached(df_cotacoes, ativo_objeto)
+    preco_atual = float(precos_ind_ativo["fechamento"].iloc[-1])
+    bandas = bandas_desvio_padrao_cached(precos_ind_ativo, period)
 
-        st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), width='stretch',
-                         config={"displayModeBar": False}, key="fig_direita")
+    if ativo_objeto in class_vol.index:
+        lv = class_vol.loc[ativo_objeto]
+        vol_hist_fmt = _badge(f"{lv['Vol_Realizada']:.2f}%", lv["Vol_Hist_class"])
+        iv_rank_fmt = _badge(f"{lv['Vol_Rank']:.2f}%", lv["Vol_Rank_class"])
+        iv_pctl_fmt = _badge(f"{lv['Vol_Percentil']:.2f}%", lv["Vol_Perc_class"])
+    else:
+        vol_hist_fmt = iv_rank_fmt = iv_pctl_fmt = "— (sem linha em class_vol)"
 
-        st.html(
-            f'<div class="disclaimer">Bandas no gráfico de Preço: calculadas em espaço de log-retorno '
-            f'acumulado (não preço bruto) — baseline (azul) = média móvel de {period} pontos; '
-            f'bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão em janela móvel de 252 '
-            f'pontos, convertidas de volta pra R$. Portado do cálculo que você enviou (sem o teste ADF, '
-            f'que não afeta o gráfico de preço). VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: '
-            f'valores e classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
-            f'df_cotacoes.xlsx. STRIKE / VENCIMENTO / CÓDIGO / PREÇO TEÓRICO / VOL IMPLÍCITA acima '
-            f'seguem o contrato {opcao["codigo"]} selecionado em "Contrato em destaque" na sidebar, '
-            f'independente do ativo-objeto escolhido nesta caixa.</div>')
+    # Campos preenchidos a partir do contrato REAL selecionado em CÓDIGO
+    # (df_opcoes.xlsx). Se a aba não existir para o ativo, cai de volta
+    # pro contrato sintético/CSV (`opcao`) selecionado na sidebar, só pra
+    # o painel não quebrar.
+    if linha_opcao is not None:
+        strike_fmt = f"{float(linha_opcao['Strike']):.2f}"
+        preco_mkt_fmt = f"{float(linha_opcao['Último']):.2f}"
+        du_fmt = f"{int(linha_opcao['Dias úteis'])} DIA(S)"
+        vencimento_fmt = _vencimento_por_dias_uteis(linha_opcao["Dias úteis"]).strftime("%d-%m-%Y")
+        tipo_fmt = str(linha_opcao["Tipo"]).upper()
+    else:
+        strike_fmt = f"{opcao['strike']:.2f}"
+        preco_mkt_fmt = f"{opcao['preco_mercado']:.2f}"
+        du_fmt = f"{opcao['dias_uteis']} DIA(S)"
+        vencimento_fmt = pd.Timestamp(opcao["vencimento"]).strftime("%d-%m-%Y")
+        tipo_fmt = opcao["tipo"]
+
+    linha1 = "".join([
+        gd._card_box("TIPO", tipo_fmt),
+        gd._card_box("STRIKE", strike_fmt),
+        gd._card_box("VENCIMENTO", vencimento_fmt),
+        gd._card_box("DIAS ÚTEIS", du_fmt),
+    ])
+    st.html(f'<div class="boxes-row">{linha1}</div>')
+
+    linha2 = "".join([
+        gd._card_box("PREÇO AÇÃO", f"{preco_atual:.2f}"),
+        gd._card_box("PREÇO MKT", preco_mkt_fmt),
+        gd._card_box("PREÇO TEÓRICO", f"{opcao['preco_teorico']:.2f}"),
+        gd._card_box("IV PERCENTIL", iv_pctl_fmt),
+        gd._card_box("IV RANK", iv_rank_fmt),
+        gd._card_box("VOL HISTÓRICA", vol_hist_fmt),
+        gd._card_box("VOL IMPLÍCITA", f"{opcao['iv_implicita']:.2f}%"),
+    ])
+    st.html(f'<div class="boxes-row">{linha2}</div>')
+
+    return {"precos_ind_ativo": precos_ind_ativo, "ativo_objeto": ativo_objeto,
+            "bandas": bandas, "period": period}
+
+
+def _grafico_opcao(precos_ind_ativo: pd.DataFrame, ativo_objeto: str, bandas: pd.DataFrame, period: int):
+    """Gráfico de Preço/Vol/RSI (SEM as métricas) — coluna DIREITA (gráficos)
+    do layout novo, no topo (acima do gráfico de GEX)."""
+    st.plotly_chart(gd._fig_direita(precos_ind_ativo, ativo_objeto, bandas=bandas), use_container_width=True,
+             config={"displayModeBar": False}, key="fig_direita")
+
+    '''st.html(
+        f'<div class="disclaimer">Bandas no gráfico de Preço: baseline (azul) = média móvel '
+        f'simples de {period} períodos sobre o log-preço normalizado de {ativo_objeto} '
+        f'(equivalente ao MM_NoTrend do script OMSF/NoTrend, só que com janela ajustável em vez '
+        f'do rolling(90) fixo); bandas verdes/vermelhas = baseline &plusmn; 1/2/3 desvios-padrão '
+        f'ROLLING (janela 252) de (log-preço &minus; baseline), depois convertidas de volta pra '
+        f'escala de preço (R$) — replica fielmente o script OMSF/NoTrend que você enviou. '
+        f'VOL HISTÓRICA / IV RANK / IV PERCENTIL de {ativo_objeto}: valores e '
+        f'classificação (Alta/Baixa/Neutra) pré-calculados na aba <code>class_vol</code> de '
+        f'df_cotacoes.xlsx. CÓDIGO / TIPO / STRIKE / VENCIMENTO / D.U. / PREÇO MKT acima vêm do '
+        f'contrato selecionado em "CÓDIGO", lido em tempo real da aba '
+        f'<code>opcoes_{ativo_objeto}</code> de df_opcoes.xlsx (VENCIMENTO = hoje + D.U. dias '
+        f'úteis, sem calendário de feriados). PREÇO TEÓRICO / VOL IMPLÍCITA continuam vindo do '
+        f'contrato sintético/CSV selecionado em "Contrato em destaque" na sidebar — ainda não há '
+        f'IV na cadeia real pra recalcular esses dois via Black-Scholes.</div>')'''
 
 
 # ----------------------------------------------------------------------------
@@ -445,22 +555,35 @@ def main():
         f"**{ticker}** · Spot {spot:.2f} · dado de referência "
         f"{pd.Timestamp(data_ref):%d/%m/%Y} · fonte: {dados['fonte']}")
 
-    col_esq, col_dir = st.columns(2, gap="large")
+    # Layout replicando a imagem de referência: coluna estreita à esquerda com
+    # TODAS as métricas/seletores/tabelas (opção + GEX, nessa ordem) e coluna
+    # larga à direita com TODOS os gráficos empilhados (Preço/Vol/RSI + perfil
+    # de GEX, nessa ordem) — proporção 2:3 medida na imagem enviada.
+    col_esq, col_dir = st.columns([2, 3], gap="large")
+
+    dados_grafico_opcao = None
     with col_esq:
-        _painel_gex(gex, ticker, data_ref)
+        with st.container(border=True):
+            try:
+                df_cotacoes = carregar_df_cotacoes()
+                class_vol = carregar_class_vol()
+                dados_grafico_opcao = _metricas_opcao(opcao, df_cotacoes, class_vol, ticker)
+            except FileNotFoundError:
+                st.error(
+                    f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. Ele precisa estar "
+                    "na raiz do repositório, junto com o streamlit_app.py.")
+            except ValueError as e:
+                st.error(
+                    f"Erro lendo `df_cotacoes.xlsx` — confira se as abas 'cotacoes' e 'class_vol' "
+                    f"existem com esses nomes exatos. Detalhe: {e}")
+
+            _metricas_gex(gex, ticker, data_ref)
+
     with col_dir:
-        try:
-            df_cotacoes = carregar_df_cotacoes()
-            class_vol = carregar_class_vol()
-            _painel_opcao(opcao, df_cotacoes, class_vol, ticker)
-        except FileNotFoundError:
-            st.error(
-                f"Não encontrei `df_cotacoes.xlsx` em `{CAMINHO_COTACOES}`. Ele precisa estar "
-                "na raiz do repositório, junto com o streamlit_app.py.")
-        except ValueError as e:
-            st.error(
-                f"Erro lendo `df_cotacoes.xlsx` — confira se as abas 'cotacoes' e 'class_vol' "
-                f"existem com esses nomes exatos. Detalhe: {e}")
+        with st.container(border=True):
+            if dados_grafico_opcao is not None:
+                _grafico_opcao(**dados_grafico_opcao)
+            _grafico_gex(gex, ticker)
 
     st.sidebar.divider()
     if st.sidebar.button("⬇️ Gerar HTML estático (export)", width='stretch'):
